@@ -1,0 +1,48 @@
+{
+  "preferences": {
+    "email": "gasa132004@gmail.com",
+    "verificationStatus": "verified",
+    "dailySummaryEnabled": true,
+    "scheduledDays": [],
+    "scheduledTime": "08:00",
+    "criticalOnly": false,
+    "exceptionTypes": [
+      "low_stock",
+      "stockout_risk",
+      "count_mismatch",
+      "aging",
+      "manual_review"
+    ],
+    "verificationToken": null,
+    "verificationTokenExpiresAt": null
+  },
+  "sentCriticalExceptions": {
+    "stockout_risk_FW-101_WH-A01": "2026-04-09T20:22:54.150Z",
+    "stockout_risk_FW-102_WH-A02": "2026-04-09T20:22:54.152Z",
+    "stockout_risk_FW-103_WH-B01": "2026-04-09T20:22:54.154Z",
+    "stockout_risk_FW-501_WH-A05": "2026-04-09T20:22:54.157Z",
+    "stockout_risk_FW-502_WH-B04": "2026-04-09T20:22:54.161Z",
+    "stockout_risk_FW-504_WH-C02": "2026-04-09T20:22:54.167Z",
+    "stockout_risk_FW-601_WH-F01": "2026-04-09T20:22:54.169Z",
+    "stockout_risk_FW-204_WH-C02": "2026-04-09T20:22:54.170Z",
+    "low_stock_AC-201_WH-A03": "2026-04-09T20:22:54.172Z",
+    "low_stock_AC-202_WH-A04": "2026-04-09T20:22:54.173Z",
+    "low_stock_AC-203_WH-C01": "2026-04-09T20:22:54.175Z",
+    "stockout_risk_FW-803_WH-J01": "2026-04-09T20:22:54.177Z",
+    "low_stock_AC-801_WH-I01": "2026-04-09T20:22:54.178Z",
+    "stockout_risk_FW-106_WH-B05": "2026-04-09T20:22:54.180Z",
+    "low_stock_GC-001_WH-H03": "2026-04-09T20:22:54.181Z",
+    "count_mismatch_FW-301_WH-B02": "2026-04-09T20:22:54.183Z",
+    "count_mismatch_FW-302_WH-B03": "2026-04-09T20:22:54.184Z",
+    "count_mismatch_AC-301_WH-D01": "2026-04-09T20:22:54.185Z",
+    "count_mismatch_PK-401_WH-D02": "2026-04-09T20:22:54.186Z",
+    "count_mismatch_AC-302_WH-D03": "2026-04-09T20:22:54.188Z",
+    "aging_FW-401_WH-E01": "2026-04-09T20:22:54.189Z",
+    "aging_FW-402_WH-E02": "2026-04-09T20:22:54.190Z",
+    "aging_FW-403_WH-E03": "2026-04-09T20:22:54.191Z",
+    "aging_AC-802_WH-J02": "2026-04-09T20:22:54.192Z",
+    "aging_AC-803_WH-K01": "2026-04-09T20:22:54.193Z",
+    "manual_review_FW-602_WH-F02": "2026-04-09T20:22:54.194Z",
+    "manual_review_FW-603_WH-F03": "2026-04-09T20:22:54.195Z"
+  }
+}

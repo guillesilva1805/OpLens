@@ -1,0 +1,2373 @@
+# OpsLens — Full Codebase Export
+# Generated: Tue Mar 24 22:12:35 -05 2026
+
+===== FILE: src/types.ts =====
+// Types for OpsLens Inventory Exception Tracker
+
+export interface RawInventoryRecord {
+  sku: string;
+  location: string;
+  description?: string;
+  category?: string;
+  on_hand_qty?: number | string;
+  reorder_point?: number | string;
+  safety_stock?: number | string;
+  avg_daily_usage?: number | string;
+  lead_time_days?: number | string;
+  system_qty?: number | string;
+  counted_qty?: number | string;
+  open_po_qty?: number | string;
+  last_movement_date?: string;
+  [key: string]: unknown;
+}
+
+export type ExceptionType =
+  | 'low_stock'
+  | 'stockout_risk'
+  | 'count_mismatch'
+  | 'aging'
+  | 'manual_review';
+
+export type Priority = 'critical' | 'high' | 'medium' | 'low' | 'none';
+
+export type Status = 'New' | 'In Review' | 'Waiting' | 'Resolved';
+
+export interface ProcessedRecord {
+  // Original fields (normalized)
+  sku: string;
+  location: string;
+  description: string;
+  category: string;
+  on_hand_qty: number | null;
+  reorder_point: number | null;
+  safety_stock: number | null;
+  avg_daily_usage: number | null;
+  lead_time_days: number | null;
+  system_qty: number | null;
+  counted_qty: number | null;
+  open_po_qty: number | null;
+  last_movement_date: string | null;
+
+  // Derived metrics
+  days_of_cover: number | null;
+  aging_days: number | null;
+
+  // Exception output
+  exception_types: ExceptionType[];
+  primary_exception_type: ExceptionType | null;
+  priority: Priority;
+  reason: string;
+  suggested_action: string;
+
+  // Follow-up (from localStorage)
+  status: Status;
+  note: string;
+
+  // Unique key
+  id: string;
+}
+
+export type ViewType = 'import' | 'dashboard' | 'queue' | 'detail';
+
+
+===== FILE: src/utils/ui.ts =====
+import type { Priority, ExceptionType, Status } from '../types';
+
+export function getPriorityBadgeClass(priority: Priority): string {
+  switch (priority) {
+    case 'critical': return 'badge-critical';
+    case 'high': return 'badge-high';
+    case 'medium': return 'badge-medium';
+    case 'low': return 'badge-low';
+    default: return 'badge-none';
+  }
+}
+
+export function getPriorityLabel(priority: Priority): string {
+  return priority.charAt(0).toUpperCase() + priority.slice(1);
+}
+
+export function getExceptionLabel(type: ExceptionType | null): string {
+  switch (type) {
+    case 'stockout_risk': return 'Stockout Risk';
+    case 'low_stock': return 'Low Stock';
+    case 'count_mismatch': return 'Count Mismatch';
+    case 'aging': return 'Aging';
+    case 'manual_review': return 'Manual Review';
+    default: return '—';
+  }
+}
+
+export function getExceptionColor(type: ExceptionType | null): string {
+  switch (type) {
+    case 'stockout_risk': return 'text-red-400';
+    case 'low_stock': return 'text-orange-400';
+    case 'count_mismatch': return 'text-yellow-400';
+    case 'aging': return 'text-purple-400';
+    case 'manual_review': return 'text-blue-400';
+    default: return 'text-gray-400';
+  }
+}
+
+export function getStatusClass(status: Status): string {
+  switch (status) {
+    case 'New': return 'status-new';
+    case 'In Review': return 'status-in-review';
+    case 'Waiting': return 'status-waiting';
+    case 'Resolved': return 'status-resolved';
+  }
+}
+
+export function formatNum(v: number | null, decimals = 0): string {
+  if (v === null) return '—';
+  return v.toFixed(decimals);
+}
+
+
+===== FILE: src/storage/localStore.ts =====
+import type { Status } from '../types';
+
+const NS = 'opslens_';
+
+function key(sku: string, location: string, field: string): string {
+  return `${NS}${field}__${sku}__${location}`;
+}
+
+export function saveNote(sku: string, location: string, note: string): void {
+  localStorage.setItem(key(sku, location, 'note'), note);
+}
+
+export function getNote(sku: string, location: string): string {
+  return localStorage.getItem(key(sku, location, 'note')) ?? '';
+}
+
+export function saveStatus(sku: string, location: string, status: Status): void {
+  localStorage.setItem(key(sku, location, 'status'), status);
+}
+
+export function getStatus(sku: string, location: string): Status {
+  const stored = localStorage.getItem(key(sku, location, 'status'));
+  if (stored === 'New' || stored === 'In Review' || stored === 'Waiting' || stored === 'Resolved') {
+    return stored;
+  }
+  return 'New';
+}
+
+export function clearAll(): void {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(NS)) keys.push(k);
+  }
+  keys.forEach(k => localStorage.removeItem(k));
+}
+
+
+===== FILE: src/engine/exceptionEngine.ts =====
+import type { RawInventoryRecord, ProcessedRecord, ExceptionType, Priority, Status } from '../types';
+import { getNote, getStatus } from '../storage/localStore';
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function toNum(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  return isNaN(n) ? null : n;
+}
+
+function parseDate(val: unknown): Date | null {
+  if (!val || typeof val !== 'string') return null;
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function daysSince(d: Date): number {
+  const now = new Date('2026-03-24'); // use current date constant for determinism
+  return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+const PRIORITY_ORDER: Priority[] = ['critical', 'high', 'medium', 'low', 'none'];
+
+const EXCEPTION_TYPE_ORDER: ExceptionType[] = [
+  'stockout_risk',
+  'low_stock',
+  'count_mismatch',
+  'aging',
+  'manual_review',
+];
+
+// ─── Exception Detection ────────────────────────────────────────────────────
+
+interface ExceptionResult {
+  type: ExceptionType;
+  priority: Priority;
+  reason: string;
+  suggested_action: string;
+}
+
+function checkLowStock(
+  on_hand_qty: number | null,
+  reorder_point: number | null,
+  safety_stock: number | null
+): ExceptionResult | null {
+  if (on_hand_qty === null) return null;
+  const threshold = reorder_point ?? safety_stock;
+  if (threshold === null) return null;
+
+  if (on_hand_qty <= threshold) {
+    const priority: Priority =
+      safety_stock !== null && on_hand_qty <= safety_stock ? 'high' : 'medium';
+    return {
+      type: 'low_stock',
+      priority,
+      reason: `On hand (${on_hand_qty}) is at or below ${reorder_point !== null ? `reorder point (${reorder_point})` : `safety stock (${safety_stock})`}`,
+      suggested_action: 'Create replenishment order or expedite open PO',
+    };
+  }
+  return null;
+}
+
+function checkStockoutRisk(
+  on_hand_qty: number | null,
+  avg_daily_usage: number | null,
+  lead_time_days: number | null
+): { result: ExceptionResult | null; days_of_cover: number | null } {
+  if (on_hand_qty === null || avg_daily_usage === null || avg_daily_usage <= 0) {
+    return { result: null, days_of_cover: null };
+  }
+
+  const days_of_cover = Math.round((on_hand_qty / avg_daily_usage) * 10) / 10;
+  const threshold = lead_time_days ?? 7;
+
+  if (days_of_cover < threshold) {
+    const priority: Priority = days_of_cover < 3 ? 'critical' : 'high';
+    return {
+      result: {
+        type: 'stockout_risk',
+        priority,
+        reason: `Days of cover (${days_of_cover}d) is less than ${lead_time_days !== null ? `lead time (${lead_time_days}d)` : 'default threshold (7d)'}`,
+        suggested_action: 'Expedite replenishment — stockout risk within lead time window',
+      },
+      days_of_cover,
+    };
+  }
+  return { result: null, days_of_cover };
+}
+
+function checkCountMismatch(
+  system_qty: number | null,
+  counted_qty: number | null
+): ExceptionResult | null {
+  if (system_qty === null || counted_qty === null) return null;
+  if (system_qty === counted_qty) return null;
+
+  const variance = Math.abs(system_qty - counted_qty);
+  const pct = system_qty !== 0 ? variance / Math.abs(system_qty) : 1;
+  const priority: Priority = variance > 20 || pct > 0.1 ? 'high' : 'medium';
+
+  return {
+    type: 'count_mismatch',
+    priority,
+    reason: `System qty (${system_qty}) does not match counted qty (${counted_qty}) — variance of ${counted_qty - system_qty > 0 ? '+' : ''}${counted_qty - system_qty} units`,
+    suggested_action: 'Investigate discrepancy and perform recount or inventory adjustment',
+  };
+}
+
+function checkAging(
+  last_movement_date: string | null
+): { result: ExceptionResult | null; aging_days: number | null } {
+  if (!last_movement_date) return { result: null, aging_days: null };
+  const d = parseDate(last_movement_date);
+  if (!d) return { result: null, aging_days: null };
+
+  const aging_days = daysSince(d);
+  if (aging_days < 30) return { result: null, aging_days };
+
+  const priority: Priority = aging_days >= 90 ? 'critical' : aging_days >= 60 ? 'high' : 'medium';
+  return {
+    result: {
+      type: 'aging',
+      priority,
+      reason: `No movement recorded for ${aging_days} days (last: ${last_movement_date})`,
+      suggested_action: 'Review for markdown, return, or write-off',
+    },
+    aging_days,
+  };
+}
+
+function checkManualReview(record: {
+  sku: string;
+  location: string;
+  on_hand_qty: number | null;
+  system_qty: number | null;
+  counted_qty: number | null;
+  avg_daily_usage: number | null;
+  last_movement_date: string | null;
+  raw_on_hand_qty: unknown;
+  raw_system_qty: unknown;
+  raw_counted_qty: unknown;
+  raw_avg_daily_usage: unknown;
+  raw_last_movement_date: unknown;
+}): ExceptionResult | null {
+  const issues: string[] = [];
+
+  if (!record.sku || record.sku.trim() === '') issues.push('missing SKU');
+  if (!record.location || record.location.trim() === '') issues.push('missing location');
+
+  if (record.raw_on_hand_qty !== undefined && record.raw_on_hand_qty !== null && record.raw_on_hand_qty !== '') {
+    if (record.on_hand_qty === null) issues.push('invalid on_hand_qty');
+    else if (record.on_hand_qty < 0) issues.push('negative on_hand_qty');
+  } else {
+    issues.push('missing on_hand_qty');
+  }
+
+  if (record.raw_system_qty !== undefined && record.raw_system_qty !== null && record.raw_system_qty !== '') {
+    if (record.system_qty !== null && record.system_qty < 0) issues.push('negative system_qty');
+  }
+  if (record.raw_counted_qty !== undefined && record.raw_counted_qty !== null && record.raw_counted_qty !== '') {
+    if (record.counted_qty !== null && record.counted_qty < 0) issues.push('negative counted_qty');
+  }
+  if (record.raw_avg_daily_usage !== undefined && record.raw_avg_daily_usage !== null && record.raw_avg_daily_usage !== '') {
+    if (record.avg_daily_usage !== null && record.avg_daily_usage < 0) issues.push('negative avg_daily_usage');
+  }
+
+  if (record.raw_last_movement_date && typeof record.raw_last_movement_date === 'string' && record.raw_last_movement_date.trim() !== '') {
+    if (!parseDate(record.raw_last_movement_date)) issues.push('invalid last_movement_date');
+  }
+
+  if (issues.length === 0) return null;
+
+  const hasIdentityIssue = issues.some(i => i.includes('SKU') || i.includes('location'));
+  return {
+    type: 'manual_review',
+    priority: hasIdentityIssue ? 'high' : 'medium',
+    reason: `Record has data quality issues: ${issues.join(', ')} — review required`,
+    suggested_action: 'Correct data entry issues before acting on this record',
+  };
+}
+
+// ─── Main Engine ───────────────────────────────────────────────────────────
+
+export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
+  return raw.map(r => {
+    const on_hand_qty = toNum(r.on_hand_qty);
+    const reorder_point = toNum(r.reorder_point);
+    const safety_stock = toNum(r.safety_stock);
+    const avg_daily_usage = toNum(r.avg_daily_usage);
+    const lead_time_days = toNum(r.lead_time_days);
+    const system_qty = toNum(r.system_qty);
+    const counted_qty = toNum(r.counted_qty);
+    const open_po_qty = toNum(r.open_po_qty);
+    const last_movement_date = r.last_movement_date?.trim() || null;
+
+    const exceptions: ExceptionResult[] = [];
+
+    // Stockout risk + days_of_cover
+    const stockoutCheck = checkStockoutRisk(on_hand_qty, avg_daily_usage, lead_time_days);
+    const days_of_cover = stockoutCheck.days_of_cover ??
+      (on_hand_qty !== null && avg_daily_usage && avg_daily_usage > 0
+        ? Math.round((on_hand_qty / avg_daily_usage) * 10) / 10
+        : null);
+    if (stockoutCheck.result) exceptions.push(stockoutCheck.result);
+
+    // Low stock
+    const lowStockResult = checkLowStock(on_hand_qty, reorder_point, safety_stock);
+    if (lowStockResult) exceptions.push(lowStockResult);
+
+    // Count mismatch
+    const mismatchResult = checkCountMismatch(system_qty, counted_qty);
+    if (mismatchResult) exceptions.push(mismatchResult);
+
+    // Aging
+    const agingCheck = checkAging(last_movement_date);
+    const aging_days = agingCheck.aging_days;
+    if (agingCheck.result) exceptions.push(agingCheck.result);
+
+    // Manual review
+    const manualResult = checkManualReview({
+      sku: r.sku,
+      location: r.location,
+      on_hand_qty,
+      system_qty,
+      counted_qty,
+      avg_daily_usage,
+      last_movement_date,
+      raw_on_hand_qty: r.on_hand_qty,
+      raw_system_qty: r.system_qty,
+      raw_counted_qty: r.counted_qty,
+      raw_avg_daily_usage: r.avg_daily_usage,
+      raw_last_movement_date: r.last_movement_date,
+    });
+    if (manualResult) exceptions.push(manualResult);
+
+    // Determine primary exception (highest priority, then by type order)
+    let primary: ExceptionResult | null = null;
+    for (const ex of exceptions) {
+      if (!primary) { primary = ex; continue; }
+      const priComp = PRIORITY_ORDER.indexOf(ex.priority) - PRIORITY_ORDER.indexOf(primary.priority);
+      if (priComp < 0) {
+        primary = ex;
+      } else if (priComp === 0) {
+        // same priority: use EXCEPTION_TYPE_ORDER
+        if (EXCEPTION_TYPE_ORDER.indexOf(ex.type) < EXCEPTION_TYPE_ORDER.indexOf(primary.type)) {
+          primary = ex;
+        }
+      }
+    }
+
+    const overallPriority: Priority = primary ? primary.priority : 'none';
+    const exception_types = [...new Set(
+      [...EXCEPTION_TYPE_ORDER.filter(t => exceptions.some(e => e.type === t))]
+    )] as ExceptionType[];
+
+    const id = `${r.sku}__${r.location}`;
+
+    return {
+      sku: r.sku || '',
+      location: r.location || '',
+      description: (r.description as string) || '',
+      category: (r.category as string) || '',
+      on_hand_qty,
+      reorder_point,
+      safety_stock,
+      avg_daily_usage,
+      lead_time_days,
+      system_qty,
+      counted_qty,
+      open_po_qty,
+      last_movement_date,
+      days_of_cover,
+      aging_days,
+      exception_types,
+      primary_exception_type: primary?.type ?? null,
+      priority: overallPriority,
+      reason: primary?.reason ?? 'No exceptions detected',
+      suggested_action: primary?.suggested_action ?? 'No action required',
+      status: getStatus(r.sku, r.location) as Status,
+      note: getNote(r.sku, r.location),
+      id,
+    };
+  });
+}
+
+
+===== FILE: src/data/demoInventory.ts =====
+import type { RawInventoryRecord } from '../types';
+
+// 28 SKU records for a footwear / accessories retailer
+// Realistic product names, locations, and quantities — relative to 2026-03-24
+
+const demoInventory: RawInventoryRecord[] = [
+
+  // ── STOCKOUT RISK ─────────────────────────────────────────────────────────
+  // DoC < lead time → must expedite
+  {
+    sku: 'FW-101',
+    location: 'WH-A01',
+    description: 'Running Trainer – Men\'s Size 10',
+    category: 'Footwear',
+    on_hand_qty: 3,
+    reorder_point: 20,
+    safety_stock: 8,
+    avg_daily_usage: 4.5,
+    lead_time_days: 14,
+    system_qty: 3,
+    counted_qty: 3,
+    open_po_qty: 50,
+    last_movement_date: '2026-03-23',
+  },
+  {
+    sku: 'FW-102',
+    location: 'WH-A02',
+    description: 'Trail Runner – Women\'s Size 8',
+    category: 'Footwear',
+    on_hand_qty: 1,
+    reorder_point: 15,
+    safety_stock: 5,
+    avg_daily_usage: 2.0,
+    lead_time_days: 10,
+    system_qty: 1,
+    counted_qty: 1,
+    open_po_qty: 30,
+    last_movement_date: '2026-03-20',
+  },
+  {
+    sku: 'FW-103',
+    location: 'WH-B01',
+    description: 'Court Shoe – White/Navy',
+    category: 'Footwear',
+    on_hand_qty: 5,
+    reorder_point: 25,
+    safety_stock: 10,
+    avg_daily_usage: 3.2,
+    lead_time_days: 21,
+    system_qty: 5,
+    counted_qty: 5,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-22',
+  },
+  {
+    sku: 'FW-501',
+    location: 'WH-A05',
+    description: 'Performance Trainer – Unisex Size 11',
+    category: 'Footwear',
+    on_hand_qty: 2,
+    reorder_point: 10,
+    safety_stock: 5,
+    avg_daily_usage: 2.0,
+    lead_time_days: 14,
+    system_qty: 2,
+    counted_qty: 2,
+    open_po_qty: 0,
+    last_movement_date: '2026-01-10', // 73d → also aging high
+  },
+  {
+    sku: 'FW-502',
+    location: 'WH-B04',
+    description: 'Waterproof Hiking Boot – Size 10',
+    category: 'Footwear',
+    on_hand_qty: 4,
+    reorder_point: 15,
+    safety_stock: 6,
+    avg_daily_usage: 1.5,
+    lead_time_days: 21,
+    system_qty: 10,
+    counted_qty: 4,
+    open_po_qty: 0,
+    last_movement_date: '2026-02-20', // 33d → also aging medium + mismatch
+  },
+  {
+    sku: 'FW-504',
+    location: 'WH-C02',
+    description: 'Compression Running Sock – 3-Pack',
+    category: 'Apparel',
+    on_hand_qty: 20,
+    reorder_point: 50,
+    safety_stock: 25,
+    avg_daily_usage: 3.0,
+    lead_time_days: 10,
+    system_qty: 20,
+    counted_qty: 20,
+    open_po_qty: 200,
+    last_movement_date: '2026-03-23',
+  },
+  {
+    sku: 'FW-601',
+    location: 'WH-F01',
+    description: 'Mesh Athletic Trainer – Grey',
+    category: 'Footwear',
+    on_hand_qty: -5, // negative qty → triggers manual review + stockout
+    reorder_point: 10,
+    safety_stock: 5,
+    avg_daily_usage: 1.0,
+    lead_time_days: 7,
+    system_qty: 25,
+    counted_qty: -5,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-10',
+  },
+  {
+    sku: 'FW-204',
+    location: 'WH-C02',
+    description: 'Moisture-Wicking Ankle Sock – White',
+    category: 'Apparel',
+    on_hand_qty: 18,
+    reorder_point: 50,
+    safety_stock: 20,
+    avg_daily_usage: 3.5,
+    lead_time_days: 10,
+    system_qty: 18,
+    counted_qty: 18,
+    open_po_qty: 150,
+    last_movement_date: '2026-03-22',
+  },
+
+  // ── LOW STOCK ──────────────────────────────────────────────────────────────
+  // on_hand ≤ reorder point, no imminent stockout
+  {
+    sku: 'AC-201',
+    location: 'WH-A03',
+    description: 'Sneaker Cleaning Kit – 8oz',
+    category: 'Accessories',
+    on_hand_qty: 12,
+    reorder_point: 20,
+    safety_stock: 10,
+    avg_daily_usage: 0.8,
+    lead_time_days: 7,
+    system_qty: 12,
+    counted_qty: 12,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-18',
+  },
+  {
+    sku: 'AC-202',
+    location: 'WH-A04',
+    description: 'Flat Lace Set – Black 120cm',
+    category: 'Accessories',
+    on_hand_qty: 8,
+    reorder_point: 30,
+    safety_stock: 15,
+    avg_daily_usage: 1.5,
+    lead_time_days: 5,
+    system_qty: 8,
+    counted_qty: 8,
+    open_po_qty: 100,
+    last_movement_date: '2026-03-21',
+  },
+  {
+    sku: 'AC-203',
+    location: 'WH-C01',
+    description: 'Arch Support Insole – Size L',
+    category: 'Accessories',
+    on_hand_qty: 6,
+    safety_stock: 10,
+    avg_daily_usage: 0.5,
+    lead_time_days: 8,
+    system_qty: 6,
+    counted_qty: 6,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-15',
+  },
+  {
+    sku: 'FW-803',
+    location: 'WH-J01',
+    description: 'Cushioned Crew Sock – White 3-Pack',
+    category: 'Apparel',
+    on_hand_qty: 9,
+    reorder_point: 20,
+    safety_stock: 10,
+    avg_daily_usage: 1.2,
+    lead_time_days: 8,
+    system_qty: 9,
+    counted_qty: 9,
+    open_po_qty: 50,
+    last_movement_date: '2026-03-22',
+  },
+  {
+    sku: 'AC-801',
+    location: 'WH-I01',
+    description: 'Suede Protector Spray – 200ml',
+    category: 'Accessories',
+    on_hand_qty: 7,
+    reorder_point: 15,
+    safety_stock: 6,
+    avg_daily_usage: 0.6,
+    lead_time_days: 9,
+    system_qty: 7,
+    counted_qty: 7,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-14',
+  },
+  {
+    sku: 'FW-106',
+    location: 'WH-B05',
+    description: 'Slip-On Canvas – Natural/White',
+    category: 'Footwear',
+    on_hand_qty: 11,
+    reorder_point: 20,
+    safety_stock: 8,
+    avg_daily_usage: 1.8,
+    lead_time_days: 12,
+    system_qty: 11,
+    counted_qty: 11,
+    open_po_qty: 40,
+    last_movement_date: '2026-03-19',
+  },
+  {
+    sku: 'GC-001',
+    location: 'WH-H03',
+    description: 'Store Gift Card – $25',
+    category: 'Gift Cards',
+    on_hand_qty: 14,
+    reorder_point: 30,
+    safety_stock: 15,
+    avg_daily_usage: 2.0,
+    lead_time_days: 3,
+    system_qty: 14,
+    counted_qty: 14,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-20',
+  },
+
+  // ── COUNT MISMATCH ─────────────────────────────────────────────────────────
+  // Physical count ≠ system record
+  {
+    sku: 'FW-301',
+    location: 'WH-B02',
+    description: 'Leather High-Top – Black Size 11',
+    category: 'Footwear',
+    on_hand_qty: 45,
+    reorder_point: 20,
+    safety_stock: 10,
+    avg_daily_usage: 1.2,
+    lead_time_days: 14,
+    system_qty: 45,
+    counted_qty: 38,  // -7 units
+    open_po_qty: 0,
+    last_movement_date: '2026-03-20',
+  },
+  {
+    sku: 'FW-302',
+    location: 'WH-B03',
+    description: 'Canvas Low-Top – Off White Size 9',
+    category: 'Footwear',
+    on_hand_qty: 22,
+    reorder_point: 15,
+    safety_stock: 8,
+    avg_daily_usage: 2.0,
+    lead_time_days: 10,
+    system_qty: 22,
+    counted_qty: 24,  // +2 units
+    open_po_qty: 0,
+    last_movement_date: '2026-03-19',
+  },
+  {
+    sku: 'AC-301',
+    location: 'WH-D01',
+    description: 'Branded Dust Bag – Standard',
+    category: 'Accessories',
+    on_hand_qty: 120,
+    reorder_point: 50,
+    safety_stock: 20,
+    avg_daily_usage: 2.5,
+    lead_time_days: 7,
+    system_qty: 120,
+    counted_qty: 98,  // -22 units, >10% variance
+    open_po_qty: 0,
+    last_movement_date: '2026-03-22',
+  },
+  {
+    sku: 'PK-401',
+    location: 'WH-D02',
+    description: 'Shoebox – Standard Size',
+    category: 'Packaging',
+    on_hand_qty: 350,
+    reorder_point: 100,
+    safety_stock: 50,
+    avg_daily_usage: 10,
+    lead_time_days: 5,
+    system_qty: 350,
+    counted_qty: 352,  // +2 units
+    open_po_qty: 500,
+    last_movement_date: '2026-03-23',
+  },
+  {
+    sku: 'AC-302',
+    location: 'WH-D03',
+    description: 'Tissue Paper – Branded 50-Pack',
+    category: 'Packaging',
+    on_hand_qty: 80,
+    reorder_point: 30,
+    safety_stock: 15,
+    avg_daily_usage: 4.0,
+    lead_time_days: 5,
+    system_qty: 80,
+    counted_qty: 65,  // -15 units
+    open_po_qty: 200,
+    last_movement_date: '2026-03-21',
+  },
+
+  // ── AGING / NO MOVEMENT ───────────────────────────────────────────────────
+  {
+    sku: 'FW-401',
+    location: 'WH-E01',
+    description: 'Limited Collab – Green Size 8',
+    category: 'Limited',
+    on_hand_qty: 18,
+    reorder_point: 5,
+    safety_stock: 2,
+    avg_daily_usage: 0.1,
+    lead_time_days: 30,
+    system_qty: 18,
+    counted_qty: 18,
+    open_po_qty: 0,
+    last_movement_date: '2025-12-01', // ~113d → critical aging
+  },
+  {
+    sku: 'FW-402',
+    location: 'WH-E02',
+    description: 'Retro Runner – Yellow Size 10',
+    category: 'Footwear',
+    on_hand_qty: 7,
+    reorder_point: 5,
+    safety_stock: 3,
+    avg_daily_usage: 0.2,
+    lead_time_days: 14,
+    system_qty: 7,
+    counted_qty: 7,
+    open_po_qty: 0,
+    last_movement_date: '2026-01-14', // ~69d → high aging
+  },
+  {
+    sku: 'FW-403',
+    location: 'WH-E03',
+    description: 'Seasonal Sandal – Tan',
+    category: 'Footwear',
+    on_hand_qty: 30,
+    reorder_point: 10,
+    safety_stock: 5,
+    avg_daily_usage: 0.5,
+    lead_time_days: 7,
+    system_qty: 30,
+    counted_qty: 30,
+    open_po_qty: 0,
+    last_movement_date: '2026-02-12', // ~40d → medium aging
+  },
+  {
+    sku: 'AC-802',
+    location: 'WH-J02',
+    description: 'Shoe Horn – Stainless Steel',
+    category: 'Accessories',
+    on_hand_qty: 25,
+    reorder_point: 10,
+    safety_stock: 5,
+    avg_daily_usage: 0,
+    lead_time_days: 10,
+    system_qty: 25,
+    counted_qty: 25,
+    open_po_qty: 0,
+    last_movement_date: '2025-09-15', // ~190d → critical aging
+  },
+  {
+    sku: 'AC-803',
+    location: 'WH-K01',
+    description: 'Leather Sneaker Balm – 50ml',
+    category: 'Accessories',
+    on_hand_qty: 40,
+    reorder_point: 15,
+    safety_stock: 8,
+    avg_daily_usage: 0.3,
+    lead_time_days: 14,
+    system_qty: 40,
+    counted_qty: 40,
+    open_po_qty: 0,
+    last_movement_date: '2025-11-10', // ~134d → critical aging
+  },
+
+  // ── MANUAL REVIEW ─────────────────────────────────────────────────────────
+  {
+    sku: 'FW-602',
+    location: 'WH-F02',
+    description: 'Slip-On Loafer – Tan',
+    category: 'Footwear',
+    on_hand_qty: undefined, // missing qty → manual review
+    reorder_point: 10,
+    safety_stock: 5,
+    last_movement_date: 'not-a-date', // invalid date
+  },
+  {
+    sku: 'FW-603',
+    location: 'WH-F03',
+    description: 'Platform Sneaker – White',
+    category: 'Footwear',
+    on_hand_qty: 15,
+    reorder_point: 8,
+    safety_stock: 4,
+    avg_daily_usage: -1.2, // negative usage → data error
+    lead_time_days: 7,
+    system_qty: 15,
+    counted_qty: 15,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-01',
+  },
+
+  // ── HEALTHY (no exceptions) ───────────────────────────────────────────────
+  {
+    sku: 'FW-701',
+    location: 'WH-G01',
+    description: 'Classic Leather Trainer – White Size 10',
+    category: 'Footwear',
+    on_hand_qty: 80,
+    reorder_point: 20,
+    safety_stock: 10,
+    avg_daily_usage: 2.5,
+    lead_time_days: 10,
+    system_qty: 80,
+    counted_qty: 80,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-22',
+  },
+  {
+    sku: 'FW-702',
+    location: 'WH-G02',
+    description: 'Kids Velcro Trainer – Blue Size 3',
+    category: 'Footwear',
+    on_hand_qty: 55,
+    reorder_point: 25,
+    safety_stock: 12,
+    avg_daily_usage: 1.8,
+    lead_time_days: 7,
+    system_qty: 55,
+    counted_qty: 55,
+    open_po_qty: 30,
+    last_movement_date: '2026-03-21',
+  },
+  {
+    sku: 'FW-703',
+    location: 'WH-H01',
+    description: 'Yoga Slide – Blush Pink Size 6',
+    category: 'Footwear',
+    on_hand_qty: 42,
+    reorder_point: 15,
+    safety_stock: 8,
+    avg_daily_usage: 1.0,
+    lead_time_days: 5,
+    system_qty: 42,
+    counted_qty: 42,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-20',
+  },
+  {
+    sku: 'AC-701',
+    location: 'WH-H02',
+    description: 'Foam Cushion Insole – Unisex M',
+    category: 'Accessories',
+    on_hand_qty: 200,
+    reorder_point: 50,
+    safety_stock: 25,
+    avg_daily_usage: 5.0,
+    lead_time_days: 7,
+    system_qty: 200,
+    counted_qty: 200,
+    open_po_qty: 0,
+    last_movement_date: '2026-03-23',
+  },
+  {
+    sku: 'GC-002',
+    location: 'WH-H03',
+    description: 'Store Gift Card – $50',
+    category: 'Gift Cards',
+    on_hand_qty: 100,
+    reorder_point: 20,
+    safety_stock: 10,
+    avg_daily_usage: 1.5,
+    lead_time_days: 3,
+    system_qty: 100,
+    counted_qty: 100,
+    open_po_qty: 200,
+    last_movement_date: '2026-03-24',
+  },
+];
+
+export default demoInventory;
+
+
+===== FILE: src/App.tsx =====
+import { useState } from 'react';
+import './index.css';
+import type { ProcessedRecord, RawInventoryRecord, ViewType } from './types';
+import { processRecords } from './engine/exceptionEngine';
+import Navbar from './components/Navbar';
+import ImportScreen from './components/ImportScreen';
+import Dashboard from './components/Dashboard';
+import ExceptionQueue from './components/ExceptionQueue';
+import ItemDetail from './components/ItemDetail';
+
+export default function App() {
+  const [view, setView] = useState<ViewType>('import');
+  const [records, setRecords] = useState<ProcessedRecord[]>([]);
+  const [dataSource, setDataSource] = useState<'demo' | 'csv' | null>(null);
+  const [selectedItem, setSelectedItem] = useState<ProcessedRecord | null>(null);
+
+  function handleDataLoaded(raw: RawInventoryRecord[], source: 'demo' | 'csv') {
+    const processed = processRecords(raw);
+    setRecords(processed);
+    setDataSource(source);
+    setView('dashboard');
+    setSelectedItem(null);
+  }
+
+  function handleNewDataSource() {
+    setView('import');
+    setRecords([]);
+    setDataSource(null);
+    setSelectedItem(null);
+  }
+
+  function handleSelectItem(record: ProcessedRecord) {
+    setSelectedItem(record);
+  }
+
+  function handleCloseDetail() {
+    setSelectedItem(null);
+  }
+
+  function handleUpdateRecord(updated: ProcessedRecord) {
+    setRecords(prev => prev.map(r => r.id === updated.id ? updated : r));
+    setSelectedItem(updated);
+  }
+
+  const exceptionCount = records.filter(r => r.exception_types.length > 0).length;
+
+  return (
+    <div className="min-h-screen flex flex-col bg-surface-900">
+      <Navbar
+        currentView={view}
+        dataSource={dataSource}
+        recordCount={records.length}
+        exceptionCount={exceptionCount}
+        onNavigate={setView}
+        onNewDataSource={handleNewDataSource}
+      />
+
+      <main className="flex-1 overflow-hidden">
+        {view === 'import' && (
+          <ImportScreen onDataLoaded={handleDataLoaded} />
+        )}
+
+        {view === 'dashboard' && dataSource && (
+          <div className="h-full overflow-y-auto">
+            <Dashboard
+              records={records}
+              onNavigateToQueue={() => setView('queue')}
+              onNewDataSource={handleNewDataSource}
+            />
+          </div>
+        )}
+
+        {view === 'queue' && dataSource && (
+          <div className="h-full overflow-y-auto">
+            <ExceptionQueue
+              records={records}
+              onSelectItem={handleSelectItem}
+              onRecordsUpdate={setRecords}
+              onBack={() => setView('dashboard')}
+            />
+          </div>
+        )}
+      </main>
+
+      {selectedItem && (
+        <ItemDetail
+          record={selectedItem}
+          onClose={handleCloseDetail}
+          onUpdate={handleUpdateRecord}
+        />
+      )}
+    </div>
+  );
+}
+
+
+===== FILE: src/components/Navbar.tsx =====
+import type { ViewType } from '../types';
+
+interface Props {
+  currentView: ViewType;
+  dataSource: 'demo' | 'csv' | null;
+  recordCount: number;
+  exceptionCount: number;
+  onNavigate: (view: ViewType) => void;
+  onNewDataSource: () => void;
+}
+
+export default function Navbar({ currentView, dataSource, recordCount, exceptionCount, onNavigate, onNewDataSource }: Props) {
+  return (
+    <nav className="bg-surface-800 border-b border-surface-600 px-4 py-0 flex-shrink-0">
+      <div className="max-w-screen-2xl mx-auto flex items-center h-12">
+        {/* Logo */}
+        <button
+          onClick={() => onNewDataSource()}
+          className="flex items-center gap-2.5 mr-8 group"
+          id="nav-logo"
+        >
+          <div className="w-7 h-7 bg-accent rounded flex items-center justify-center group-hover:bg-accent-hover transition-colors">
+            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+          <span className="text-sm font-bold text-white tracking-tight">OpsLens</span>
+        </button>
+
+        {/* Nav items (only when data is loaded) */}
+        {dataSource && (
+          <div className="flex items-center gap-1">
+            <NavItem
+              label="Dashboard"
+              active={currentView === 'dashboard'}
+              onClick={() => onNavigate('dashboard')}
+              id="nav-dashboard"
+            />
+            <NavItem
+              label={`Exception Queue ${exceptionCount > 0 ? `(${exceptionCount})` : ''}`}
+              active={currentView === 'queue'}
+              onClick={() => onNavigate('queue')}
+              id="nav-queue"
+            />
+          </div>
+        )}
+
+        {/* Right side meta */}
+        <div className="ml-auto flex items-center gap-4">
+          {dataSource && (
+            <span className="text-xs text-muted hidden sm:block">
+              <span className="text-surface-500 mr-1">{dataSource === 'demo' ? 'Demo data' : 'CSV upload'} ·</span>
+              <span className="font-mono">{recordCount} SKUs</span>
+            </span>
+          )}
+          {dataSource && (
+            <button
+              onClick={onNewDataSource}
+              className="btn-ghost text-xs"
+              id="nav-new-datasource"
+            >
+              New Session
+            </button>
+          )}
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+function NavItem({ label, active, onClick, id }: { label: string; active: boolean; onClick: () => void; id: string }) {
+  return (
+    <button
+      id={id}
+      onClick={onClick}
+      className={`relative text-xs font-medium px-3 py-1.5 transition-colors ${
+        active
+          ? 'text-white'
+          : 'text-muted hover:text-gray-300'
+      }`}
+    >
+      {label}
+      {active && (
+        <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-accent rounded-full" />
+      )}
+    </button>
+  );
+}
+
+
+===== FILE: src/components/ImportScreen.tsx =====
+import React, { useRef, useState } from 'react';
+import Papa from 'papaparse';
+import type { RawInventoryRecord } from '../types';
+import demoInventory from '../data/demoInventory';
+
+interface Props {
+  onDataLoaded: (records: RawInventoryRecord[], source: 'demo' | 'csv') => void;
+}
+
+const REQUIRED_COLUMNS = ['sku', 'location', 'on_hand_qty'];
+const OPTIONAL_COLUMNS = [
+  'description', 'category', 'reorder_point', 'safety_stock',
+  'avg_daily_usage', 'lead_time_days', 'system_qty', 'counted_qty',
+  'open_po_qty', 'last_movement_date',
+];
+
+export default function ImportScreen({ onDataLoaded }: Props) {
+  const [isDragging, setIsDragging] = useState(false);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [parseWarnings, setParseWarnings] = useState<string[]>([]);
+  const [parsedInfo, setParsedInfo] = useState<{ rows: number; cols: string[] } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function handleDemoData() {
+    setParseError(null);
+    setParseWarnings([]);
+    setParsedInfo(null);
+    onDataLoaded(demoInventory, 'demo');
+  }
+
+  function processFile(file: File) {
+    setParseError(null);
+    setParseWarnings([]);
+    setParsedInfo(null);
+
+    if (!file.name.endsWith('.csv')) {
+      setParseError('Only CSV files are supported. Please upload a .csv file.');
+      return;
+    }
+
+    Papa.parse<RawInventoryRecord>(file, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      complete: (result) => {
+        const cols = result.meta.fields ?? [];
+        const warnings: string[] = [];
+
+        const missingRequired = REQUIRED_COLUMNS.filter(c => !cols.map(c => c.toLowerCase().trim()).includes(c));
+        if (missingRequired.length > 0) {
+          setParseError(`Missing required columns: ${missingRequired.join(', ')}. Your CSV must include: sku, location, on_hand_qty.`);
+          return;
+        }
+
+        const detectedOptional = OPTIONAL_COLUMNS.filter(c => cols.map(c => c.toLowerCase().trim()).includes(c));
+        const missingOptional = OPTIONAL_COLUMNS.filter(c => !cols.map(c => c.toLowerCase().trim()).includes(c));
+
+        if (missingOptional.length > 0) {
+          warnings.push(`Optional columns not found (exception logic will be partially applied): ${missingOptional.join(', ')}`);
+        }
+
+        if (result.data.length === 0) {
+          setParseError('The CSV file contains no data rows.');
+          return;
+        }
+
+        // Normalize column names to lowercase
+        const normalized: RawInventoryRecord[] = result.data.map((row: Record<string, unknown>) => {
+          const norm: Record<string, unknown> = {};
+          for (const key of Object.keys(row)) {
+            norm[key.toLowerCase().trim()] = row[key];
+          }
+          return norm as RawInventoryRecord;
+        });
+
+        setParseWarnings(warnings);
+        setParsedInfo({ rows: normalized.length, cols: [...REQUIRED_COLUMNS, ...detectedOptional] });
+
+        setTimeout(() => {
+          onDataLoaded(normalized, 'csv');
+        }, 1200);
+      },
+      error: (err) => {
+        setParseError(`Parse error: ${err.message}`);
+      },
+    });
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center px-4 py-16">
+      {/* Header */}
+      <div className="text-center mb-12">
+        <div className="inline-flex items-center gap-2 bg-accent-muted border border-accent/30 rounded-full px-4 py-1.5 text-xs text-blue-300 font-medium mb-6">
+          <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+          Warehouse Exception Tracker
+        </div>
+        <h1 className="text-4xl font-bold text-white mb-3 tracking-tight">
+          OpsLens
+        </h1>
+        <p className="text-muted text-base max-w-sm mx-auto leading-relaxed">
+          Surface inventory exceptions, prioritize action, and track follow-up — all in the browser.
+        </p>
+      </div>
+
+      <div className="w-full max-w-2xl space-y-4">
+        {/* Demo data button */}
+        <button
+          id="btn-use-demo-data"
+          onClick={handleDemoData}
+          className="w-full card p-6 text-left hover:border-accent/50 hover:bg-surface-700 transition-all duration-200 group"
+        >
+          <div className="flex items-start gap-4">
+            <div className="w-10 h-10 rounded-lg bg-accent/20 flex items-center justify-center flex-shrink-0 group-hover:bg-accent/30 transition-colors">
+              <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-white font-semibold">Use Demo Data</span>
+                <span className="text-xs bg-blue-900/60 text-blue-300 border border-blue-700/50 rounded px-2 py-0.5">Recommended</span>
+              </div>
+              <p className="text-sm text-muted">
+                28 SKUs across Footwear, Accessories, and Packaging — covering all five exception types with realistic quantities, dates, and data quality issues.
+              </p>
+            </div>
+            <svg className="w-5 h-5 text-muted group-hover:text-accent transition-colors flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </div>
+        </button>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 border-t border-surface-600"></div>
+          <span className="text-xs text-muted uppercase tracking-wider">or upload your own</span>
+          <div className="flex-1 border-t border-surface-600"></div>
+        </div>
+
+        {/* CSV Dropzone */}
+        <div
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          onClick={() => fileRef.current?.click()}
+          className={`
+            card p-8 text-center cursor-pointer transition-all duration-200
+            ${isDragging
+              ? 'border-accent bg-accent-muted/20'
+              : 'hover:border-surface-500 hover:bg-surface-700/50'
+            }
+          `}
+        >
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv"
+            className="hidden"
+            id="csv-upload-input"
+            onChange={handleFileChange}
+          />
+          <div className="w-12 h-12 rounded-xl bg-surface-700 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-6 h-6 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+          </div>
+          <p className="text-sm text-gray-300 font-medium mb-1">
+            {isDragging ? 'Drop your CSV here' : 'Drop CSV here or click to browse'}
+          </p>
+          <p className="text-xs text-muted">Required columns: sku, location, on_hand_qty</p>
+        </div>
+
+        {/* Parse error */}
+        {parseError && (
+          <div className="card p-4 border-red-800/60 bg-red-900/20">
+            <div className="flex items-start gap-3">
+              <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="text-sm text-red-300 font-medium">Parse Error</p>
+                <p className="text-xs text-red-400 mt-0.5">{parseError}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Parse warnings */}
+        {parseWarnings.length > 0 && (
+          <div className="card p-4 border-yellow-800/50 bg-yellow-900/10">
+            <p className="text-xs text-yellow-400 font-medium mb-1">Warnings</p>
+            {parseWarnings.map((w, i) => (
+              <p key={i} className="text-xs text-yellow-500">{w}</p>
+            ))}
+          </div>
+        )}
+
+        {/* Parse success */}
+        {parsedInfo && (
+          <div className="card p-4 border-green-800/50 bg-green-900/10">
+            <div className="flex items-center gap-3">
+              <svg className="w-5 h-5 text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="text-sm text-green-300 font-medium">File accepted — running exception scan</p>
+                <p className="text-xs text-green-500">{parsedInfo.rows} records · {parsedInfo.cols.length} columns recognized — navigating to dashboard…</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Column reference */}
+        <div className="card p-5">
+          <p className="text-xs text-muted font-medium uppercase tracking-wider mb-3">Expected CSV Columns</p>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
+            {[...REQUIRED_COLUMNS.map(c => ({ col: c, req: true })),
+              ...OPTIONAL_COLUMNS.map(c => ({ col: c, req: false }))].map(({ col, req }) => (
+              <div key={col} className="flex items-center gap-2">
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${req ? 'bg-blue-400' : 'bg-surface-500'}`}></span>
+                <code className="text-xs font-mono text-gray-300">{col}</code>
+                {req && <span className="text-xs text-blue-500">required</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+===== FILE: src/components/Dashboard.tsx =====
+import type { ProcessedRecord, ExceptionType, Priority } from '../types';
+import { getExceptionLabel, getExceptionColor } from '../utils/ui';
+
+interface Props {
+  records: ProcessedRecord[];
+  onNavigateToQueue: () => void;
+  onNewDataSource: () => void;
+}
+
+const EXCEPTION_TYPES: ExceptionType[] = [
+  'stockout_risk', 'low_stock', 'count_mismatch', 'aging', 'manual_review',
+];
+
+const EXCEPTION_COLORS: Record<ExceptionType, string> = {
+  stockout_risk: 'bg-red-500',
+  low_stock: 'bg-orange-500',
+  count_mismatch: 'bg-yellow-500',
+  aging: 'bg-purple-500',
+  manual_review: 'bg-blue-500',
+};
+
+const PRIORITY_COLORS: Record<Priority, string> = {
+  critical: 'text-red-400',
+  high: 'text-orange-400',
+  medium: 'text-yellow-400',
+  low: 'text-green-400',
+  none: 'text-gray-500',
+};
+
+export default function Dashboard({ records, onNavigateToQueue, onNewDataSource }: Props) {
+  const exceptions = records.filter(r => r.exception_types.length > 0);
+  const critical = records.filter(r => r.priority === 'critical');
+  const high = records.filter(r => r.priority === 'high');
+
+  const breakdownCounts = EXCEPTION_TYPES.map(type => ({
+    type,
+    count: records.filter(r => r.exception_types.includes(type)).length,
+  })).filter(x => x.count > 0);
+
+  const maxCount = Math.max(...breakdownCounts.map(x => x.count), 1);
+
+  const priorityBreakdown: { priority: Priority; count: number; label: string }[] = (
+    [
+      { priority: 'critical' as Priority, count: critical.length, label: 'Critical' },
+      { priority: 'high' as Priority, count: high.length, label: 'High' },
+      { priority: 'medium' as Priority, count: records.filter(r => r.priority === 'medium').length, label: 'Medium' },
+      { priority: 'low' as Priority, count: records.filter(r => r.priority === 'low').length, label: 'Low' },
+    ] as { priority: Priority; count: number; label: string }[]
+  ).filter(x => x.count > 0);
+
+  return (
+    <div className="max-w-6xl mx-auto px-4 py-8">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h2 className="text-2xl font-bold text-white">Dashboard</h2>
+          <p className="text-sm text-muted mt-0.5">Exception summary · {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={onNewDataSource} className="btn-ghost text-xs" id="btn-new-datasource">
+            ← New Data Source
+          </button>
+          <button onClick={onNavigateToQueue} className="btn-primary" id="btn-view-queue">
+            View Exception Queue →
+          </button>
+        </div>
+      </div>
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <StatCard
+          label="Total SKUs"
+          value={records.length}
+          sub="in dataset"
+          icon={
+            <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+          }
+        />
+        <StatCard
+          label="With Exceptions"
+          value={exceptions.length}
+          sub={`${records.length > 0 ? Math.round((exceptions.length / records.length) * 100) : 0}% of inventory`}
+          icon={
+            <svg className="w-5 h-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          }
+          highlight="orange"
+        />
+        <StatCard
+          label="Critical"
+          value={critical.length}
+          sub="expedite now"
+          icon={
+            <svg className="w-5 h-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+          highlight="red"
+        />
+        <StatCard
+          label="High Priority"
+          value={high.length}
+          sub="action this week"
+          icon={
+            <svg className="w-5 h-5 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          }
+          highlight="yellow"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Exception type breakdown */}
+        <div className="card p-6">
+          <h3 className="text-sm font-semibold text-gray-200 mb-5 uppercase tracking-wider">By Exception Type</h3>
+          {breakdownCounts.length === 0 ? (
+            <p className="text-sm text-muted text-center py-8">No exceptions detected</p>
+          ) : (
+            <div className="space-y-3">
+              {breakdownCounts.map(({ type, count }) => (
+                <div key={type}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className={`text-sm font-medium ${getExceptionColor(type)}`}>{getExceptionLabel(type)}</span>
+                    <span className="text-sm text-gray-400 font-mono">{count}</span>
+                  </div>
+                  <div className="h-2 bg-surface-700 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${EXCEPTION_COLORS[type]} transition-all duration-500`}
+                      style={{ width: `${(count / maxCount) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Priority distribution */}
+        <div className="card p-6">
+          <h3 className="text-sm font-semibold text-gray-200 mb-5 uppercase tracking-wider">By Priority Level</h3>
+          {priorityBreakdown.length === 0 ? (
+            <p className="text-sm text-muted text-center py-8">No exceptions detected</p>
+          ) : (
+            <div className="space-y-4">
+              {priorityBreakdown.map(({ priority, count, label }) => (
+                <div key={priority} className="flex items-center gap-4">
+                  <span className={`text-sm font-semibold w-16 flex-shrink-0 ${PRIORITY_COLORS[priority]}`}>{label}</span>
+                  <div className="flex-1 h-6 bg-surface-700 rounded overflow-hidden">
+                    <div
+                      className="h-full flex items-center justify-end pr-2"
+                      style={{
+                        width: `${(count / (exceptions.length || 1)) * 100}%`,
+                        background: priority === 'critical' ? '#7f1d1d50' : priority === 'high' ? '#7c2d1250' : priority === 'medium' ? '#71350050' : '#14532d50',
+                        borderRight: `2px solid ${priority === 'critical' ? '#ef4444' : priority === 'high' ? '#f97316' : priority === 'medium' ? '#eab308' : '#22c55e'}`,
+                      }}
+                    >
+                      <span className={`text-xs font-mono ${PRIORITY_COLORS[priority]}`}>{count}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <div className="pt-2 border-t border-surface-600 mt-2">
+                <div className="flex items-center justify-between text-xs text-muted">
+                  <span>Clean SKUs — no exceptions</span>
+                  <span className="font-mono text-green-400">{records.length - exceptions.length}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Quick action */}
+          {critical.length > 0 && (
+            <button
+              onClick={onNavigateToQueue}
+              className="mt-5 w-full btn-primary text-center text-sm"
+              id="btn-review-critical"
+            >
+              Review {critical.length} Critical {critical.length === 1 ? 'Item' : 'Items'} →
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({
+  label, value, sub, icon, highlight,
+}: {
+  label: string;
+  value: number;
+  sub: string;
+  icon: React.ReactNode;
+  highlight?: 'red' | 'orange' | 'yellow';
+}) {
+  const borderColorMap: Record<string, string> = {
+    red: 'border-red-800/50',
+    orange: 'border-orange-800/50',
+    yellow: 'border-yellow-800/50',
+  };
+  const borderColor = highlight ? (borderColorMap[highlight] ?? '') : '';
+
+  const glowBgMap: Record<string, string> = {
+    red: 'bg-red-900/10',
+    orange: 'bg-orange-900/10',
+    yellow: 'bg-yellow-900/10',
+  };
+  const glowBg = highlight ? (glowBgMap[highlight] ?? '') : '';
+
+  return (
+    <div className={`card p-5 ${borderColor} ${glowBg}`}>
+      <div className="flex items-start justify-between mb-3">
+        <div className="w-9 h-9 rounded-lg bg-surface-700 flex items-center justify-center">{icon}</div>
+      </div>
+      <p className="text-3xl font-bold text-white font-mono mb-1">{value}</p>
+      <p className="text-xs text-gray-400 font-medium">{label}</p>
+      <p className="text-xs text-muted mt-0.5">{sub}</p>
+    </div>
+  );
+}
+
+
+===== FILE: src/components/ExceptionQueue.tsx =====
+import { useState, useMemo } from 'react';
+import type { ProcessedRecord, ExceptionType, Priority, Status } from '../types';
+import {
+  getPriorityBadgeClass, getPriorityLabel, getExceptionLabel, getExceptionColor, getStatusClass, formatNum,
+} from '../utils/ui';
+import { saveStatus } from '../storage/localStore';
+
+interface Props {
+  records: ProcessedRecord[];
+  onSelectItem: (record: ProcessedRecord) => void;
+  onRecordsUpdate: (records: ProcessedRecord[]) => void;
+  onBack: () => void;
+}
+
+type SortField =
+  | 'sku' | 'location' | 'on_hand_qty' | 'reorder_point'
+  | 'avg_daily_usage' | 'days_of_cover' | 'primary_exception_type' | 'priority' | 'status';
+type SortDir = 'asc' | 'desc';
+
+const EXCEPTION_TYPES: ExceptionType[] = [
+  'stockout_risk', 'low_stock', 'count_mismatch', 'aging', 'manual_review',
+];
+const PRIORITIES: Priority[] = ['critical', 'high', 'medium', 'low', 'none'];
+const STATUSES: Status[] = ['New', 'In Review', 'Waiting', 'Resolved'];
+
+const PRIORITY_ORDER_MAP: Record<Priority, number> = {
+  critical: 0, high: 1, medium: 2, low: 3, none: 4,
+};
+
+export default function ExceptionQueue({ records, onSelectItem, onRecordsUpdate, onBack }: Props) {
+  const [search, setSearch] = useState('');
+  const [filterException, setFilterException] = useState<ExceptionType | 'all'>('all');
+  const [filterPriority, setFilterPriority] = useState<Priority | 'all'>('all');
+  const [filterStatus, setFilterStatus] = useState<Status | 'all'>('all');
+  const [showExceptionsOnly, setShowExceptionsOnly] = useState(true);
+  const [sortField, setSortField] = useState<SortField>('priority');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+
+  const filtered = useMemo(() => {
+    let result = records;
+
+    if (showExceptionsOnly) {
+      result = result.filter(r => r.exception_types.length > 0);
+    }
+
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter(r =>
+        r.sku.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q) ||
+        r.location.toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q)
+      );
+    }
+
+    if (filterException !== 'all') {
+      result = result.filter(r => r.exception_types.includes(filterException));
+    }
+    if (filterPriority !== 'all') {
+      result = result.filter(r => r.priority === filterPriority);
+    }
+    if (filterStatus !== 'all') {
+      result = result.filter(r => r.status === filterStatus);
+    }
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      let aVal: string | number, bVal: string | number;
+      switch (sortField) {
+        case 'priority':
+          aVal = PRIORITY_ORDER_MAP[a.priority];
+          bVal = PRIORITY_ORDER_MAP[b.priority];
+          break;
+        case 'sku': aVal = a.sku; bVal = b.sku; break;
+        case 'location': aVal = a.location; bVal = b.location; break;
+        case 'on_hand_qty': aVal = a.on_hand_qty ?? -999; bVal = b.on_hand_qty ?? -999; break;
+        case 'reorder_point': aVal = a.reorder_point ?? -999; bVal = b.reorder_point ?? -999; break;
+        case 'avg_daily_usage': aVal = a.avg_daily_usage ?? -999; bVal = b.avg_daily_usage ?? -999; break;
+        case 'days_of_cover': aVal = a.days_of_cover ?? 9999; bVal = b.days_of_cover ?? 9999; break;
+        case 'primary_exception_type': aVal = a.primary_exception_type ?? 'zzz'; bVal = b.primary_exception_type ?? 'zzz'; break;
+        case 'status': aVal = a.status; bVal = b.status; break;
+        default: aVal = 0; bVal = 0;
+      }
+      if (typeof aVal === 'string') return sortDir === 'asc' ? aVal.localeCompare(bVal as string) : (bVal as string).localeCompare(aVal);
+      return sortDir === 'asc' ? aVal - (bVal as number) : (bVal as number) - aVal;
+    });
+
+    return result;
+  }, [records, search, filterException, filterPriority, filterStatus, showExceptionsOnly, sortField, sortDir]);
+
+  function handleSort(field: SortField) {
+    if (sortField === field) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDir('asc');
+    }
+  }
+
+  function SortIcon({ field }: { field: SortField }) {
+    if (sortField !== field) return <span className="text-surface-500 ml-1">↕</span>;
+    return <span className="text-blue-400 ml-1">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+  }
+
+  function handleStatusChange(record: ProcessedRecord, newStatus: Status) {
+    saveStatus(record.sku, record.location, newStatus);
+    const updated = records.map(r =>
+      r.id === record.id ? { ...r, status: newStatus } : r
+    );
+    onRecordsUpdate(updated);
+  }
+
+  const exceptionCount = records.filter(r => r.exception_types.length > 0).length;
+
+  return (
+    <div className="max-w-screen-2xl mx-auto px-4 py-6">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <div className="flex items-center gap-3">
+            <button onClick={onBack} className="btn-ghost text-xs" id="btn-back-to-dashboard">← Dashboard</button>
+            <h2 className="text-xl font-bold text-white">Exception Queue</h2>
+            <span className="text-xs bg-surface-700 border border-surface-500 rounded-full px-3 py-1 text-muted font-mono">
+              {filtered.length} shown
+            </span>
+          </div>
+          <p className="text-xs text-muted mt-1 ml-0">
+            {exceptionCount} SKUs flagged · {records.length - exceptionCount} clean — sorted by priority
+          </p>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="card p-4 mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Search */}
+          <div className="relative flex-1 min-w-48">
+            <svg className="w-4 h-4 text-muted absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              id="queue-search"
+              type="text"
+              placeholder="Search SKU, description, location…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="input w-full pl-9"
+            />
+          </div>
+
+          {/* Exception filter */}
+          <select
+            id="filter-exception"
+            value={filterException}
+            onChange={e => setFilterException(e.target.value as ExceptionType | 'all')}
+            className="select"
+          >
+            <option value="all">All Exceptions</option>
+            {EXCEPTION_TYPES.map(t => (
+              <option key={t} value={t}>{getExceptionLabel(t)}</option>
+            ))}
+          </select>
+
+          {/* Priority filter */}
+          <select
+            id="filter-priority"
+            value={filterPriority}
+            onChange={e => setFilterPriority(e.target.value as Priority | 'all')}
+            className="select"
+          >
+            <option value="all">All Priorities</option>
+            {PRIORITIES.map(p => (
+              <option key={p} value={p}>{getPriorityLabel(p)}</option>
+            ))}
+          </select>
+
+          {/* Status filter */}
+          <select
+            id="filter-status"
+            value={filterStatus}
+            onChange={e => setFilterStatus(e.target.value as Status | 'all')}
+            className="select"
+          >
+            <option value="all">All Statuses</option>
+            {STATUSES.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+
+          {/* Toggle exceptions only */}
+          <label className="flex items-center gap-2 cursor-pointer ml-auto">
+            <span className="text-xs text-muted">Exceptions only</span>
+            <div
+              onClick={() => setShowExceptionsOnly(v => !v)}
+              className={`w-9 h-5 rounded-full transition-colors cursor-pointer ${showExceptionsOnly ? 'bg-accent' : 'bg-surface-600'}`}
+            >
+              <div className={`w-3.5 h-3.5 bg-white rounded-full mt-0.5 transition-transform ${showExceptionsOnly ? 'translate-x-4 ml-0.5' : 'ml-0.5'}`} />
+            </div>
+          </label>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-surface-600 bg-surface-800">
+                {([
+                  ['sku', 'SKU'],
+                  ['location', 'Location'],
+                  [null, 'Description'],
+                  ['on_hand_qty', 'On Hand'],
+                  ['reorder_point', 'ROP'],
+                  ['avg_daily_usage', 'Avg/Day'],
+                  ['days_of_cover', 'DoC'],
+                  ['primary_exception_type', 'Exception'],
+                  ['priority', 'Priority'],
+                  [null, 'Suggested Action'],
+                  ['status', 'Status'],
+                  [null, 'Note'],
+                ] as [SortField | null, string][]).map(([field, label]) => (
+                  <th
+                    key={label}
+                    onClick={field ? () => handleSort(field) : undefined}
+                    className={`text-left px-4 py-3 text-xs font-semibold text-muted uppercase tracking-wider whitespace-nowrap ${field ? 'cursor-pointer hover:text-gray-300 select-none' : ''}`}
+                  >
+                    {label}
+                    {field && <SortIcon field={field} />}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={12} className="text-center py-16 text-muted text-sm">
+                    No records match the current filters.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map(record => (
+                  <tr
+                    key={record.id}
+                    onClick={() => onSelectItem(record)}
+                    className={`
+                      border-b border-surface-700 cursor-pointer transition-colors
+                      hover:bg-surface-700/40
+                      ${record.priority === 'critical' ? 'border-l-2 border-l-red-700' : ''}
+                      ${record.priority === 'high' ? 'border-l-2 border-l-orange-700' : ''}
+                    `}
+                  >
+                    <td className="px-4 py-3 font-mono text-xs text-gray-300 whitespace-nowrap">{record.sku}</td>
+                    <td className="px-4 py-3 text-xs text-muted whitespace-nowrap">{record.location}</td>
+                    <td className="px-4 py-3 text-xs text-gray-300 max-w-40 truncate">{record.description || '—'}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-gray-200 text-right">{formatNum(record.on_hand_qty)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted text-right">{formatNum(record.reorder_point)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-muted text-right">{formatNum(record.avg_daily_usage, 1)}</td>
+                    <td className="px-4 py-3 text-xs font-mono text-right">
+                      {record.days_of_cover !== null ? (
+                        <span className={record.days_of_cover < 3 ? 'text-red-400' : record.days_of_cover < 7 ? 'text-orange-400' : 'text-gray-300'}>
+                          {formatNum(record.days_of_cover, 1)}d
+                        </span>
+                      ) : '—'}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {record.primary_exception_type ? (
+                        <span className={`text-xs font-medium ${getExceptionColor(record.primary_exception_type)}`}>
+                          {getExceptionLabel(record.primary_exception_type)}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className={`${getPriorityBadgeClass(record.priority)} text-xs`}>
+                        {getPriorityLabel(record.priority)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-muted max-w-48 truncate">{record.suggested_action}</td>
+                    <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                      <select
+                        id={`status-${record.id}`}
+                        value={record.status}
+                        onChange={e => handleStatusChange(record, e.target.value as Status)}
+                        className={`text-xs rounded px-2 py-1 border font-medium bg-transparent cursor-pointer ${getStatusClass(record.status)}`}
+                      >
+                        {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      {record.note ? (
+                        <span className="text-blue-400 text-xs" title={`Note: ${record.note.slice(0, 60)}${record.note.length > 60 ? '…' : ''}`}>●</span>
+                      ) : (
+                        <span className="text-surface-500 text-xs">○</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted mt-3 text-right">
+        {filtered.length} of {showExceptionsOnly ? exceptionCount : records.length} records shown · Click any row to open detail view
+      </p>
+    </div>
+  );
+}
+
+
+===== FILE: src/components/ItemDetail.tsx =====
+import { useState, useEffect } from 'react';
+import type { ProcessedRecord, Status } from '../types';
+import {
+  getPriorityBadgeClass, getPriorityLabel, getExceptionLabel, getExceptionColor,
+  getStatusClass, formatNum,
+} from '../utils/ui';
+import { saveNote, saveStatus } from '../storage/localStore';
+
+interface Props {
+  record: ProcessedRecord;
+  onClose: () => void;
+  onUpdate: (updated: ProcessedRecord) => void;
+}
+
+const STATUSES: Status[] = ['New', 'In Review', 'Waiting', 'Resolved'];
+
+export default function ItemDetail({ record, onClose, onUpdate }: Props) {
+  const [note, setNote] = useState(record.note);
+  const [status, setStatus] = useState<Status>(record.status);
+
+  // Sync when record changes (e.g. navigating to a different item)
+  useEffect(() => {
+    setNote(record.note);
+    setStatus(record.status);
+  }, [record.id]);
+
+  function handleNoteChange(val: string) {
+    setNote(val);
+    saveNote(record.sku, record.location, val);
+    onUpdate({ ...record, note: val, status });
+  }
+
+  function handleStatusChange(val: Status) {
+    setStatus(val);
+    saveStatus(record.sku, record.location, val);
+    onUpdate({ ...record, status: val, note });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-stretch justify-end" onClick={onClose}>
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+
+      {/* Panel */}
+      <div
+        className="relative w-full max-w-lg bg-surface-800 border-l border-surface-600 flex flex-col h-full overflow-y-auto shadow-2xl"
+        onClick={e => e.stopPropagation()}
+        id="item-detail-panel"
+      >
+        {/* Panel header */}
+        <div className="p-5 border-b border-surface-600 flex-shrink-0">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs text-muted mb-1 font-mono">{record.location}</p>
+              <h3 className="text-lg font-bold text-white">{record.sku}</h3>
+              {record.description && (
+                <p className="text-sm text-gray-400 mt-0.5">{record.description}</p>
+              )}
+              {record.category && (
+                <span className="text-xs text-muted bg-surface-700 border border-surface-500 rounded px-2 py-0.5 inline-block mt-2">
+                  {record.category}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              className="btn-ghost p-2 -mr-1 mt-0"
+              id="btn-close-detail"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+          {/* Priority + status */}
+          <div className="flex items-center gap-3">
+            <span className={`${getPriorityBadgeClass(record.priority)} text-xs px-3 py-1`}>
+              {getPriorityLabel(record.priority)} Priority
+            </span>
+            <select
+              id="detail-status-select"
+              value={status}
+              onChange={e => handleStatusChange(e.target.value as Status)}
+              className={`text-xs rounded px-2 py-1 border font-medium bg-transparent cursor-pointer ${getStatusClass(status)}`}
+            >
+              {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          {/* Exception types */}
+          <Section title="Exception Details">
+            {record.exception_types.length === 0 ? (
+              <p className="text-sm text-green-400">✓ No exceptions detected</p>
+            ) : (
+              <div className="space-y-3">
+                {record.exception_types.map(type => (
+                  <div key={type} className="flex items-center gap-2">
+                    <span className={`text-xs font-semibold ${getExceptionColor(type)} w-36 flex-shrink-0`}>
+                      {getExceptionLabel(type)}
+                    </span>
+                    <span className="text-xs text-muted">
+                      {type === record.primary_exception_type ? '← primary' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/* Why flagged */}
+          {record.primary_exception_type && (
+            <Section title="Why This Was Flagged">
+              <p className="text-sm text-gray-300 leading-relaxed">{record.reason}</p>
+            </Section>
+          )}
+
+          {/* Suggested action */}
+          {record.primary_exception_type && (
+            <Section title="Suggested Action">
+              <div className="flex items-start gap-3 bg-accent-muted/30 border border-accent/20 rounded-lg p-3">
+                <svg className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p className="text-sm text-blue-200">{record.suggested_action}</p>
+              </div>
+            </Section>
+          )}
+
+          {/* Computed metrics */}
+          <Section title="Calculated Metrics">
+            <div className="grid grid-cols-2 gap-3">
+              {record.days_of_cover !== null && (
+                <MetricCard
+                  label="Days of Cover"
+                  value={`${formatNum(record.days_of_cover, 1)} days`}
+                  sub={record.lead_time_days !== null ? `vs ${record.lead_time_days}d lead time` : 'vs 7d default'}
+                  warn={record.days_of_cover < (record.lead_time_days ?? 7)}
+                />
+              )}
+              {record.aging_days !== null && (
+                <MetricCard
+                  label="Days Since Movement"
+                  value={`${record.aging_days} days`}
+                  sub={record.last_movement_date ?? ''}
+                  warn={record.aging_days >= 30}
+                />
+              )}
+              {record.system_qty !== null && record.counted_qty !== null && record.system_qty !== record.counted_qty && (
+                <MetricCard
+                  label="Count Variance"
+                  value={`${record.counted_qty - record.system_qty > 0 ? '+' : ''}${record.counted_qty - record.system_qty} units`}
+                  sub={`System: ${record.system_qty} · Counted: ${record.counted_qty}`}
+                  warn={true}
+                />
+              )}
+            </div>
+          </Section>
+
+          {/* Inventory data */}
+          <Section title="Inventory Record">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+              <DataRow label="On Hand" value={formatNum(record.on_hand_qty)} />
+              <DataRow label="Reorder Point" value={formatNum(record.reorder_point)} />
+              <DataRow label="Safety Stock" value={formatNum(record.safety_stock)} />
+              <DataRow label="Avg Daily Usage" value={formatNum(record.avg_daily_usage, 2)} />
+              <DataRow label="Lead Time" value={record.lead_time_days !== null ? `${record.lead_time_days}d` : '—'} />
+              <DataRow label="Open PO Qty" value={formatNum(record.open_po_qty)} />
+              <DataRow label="System Qty" value={formatNum(record.system_qty)} />
+              <DataRow label="Counted Qty" value={formatNum(record.counted_qty)} />
+              <DataRow label="Last Movement" value={record.last_movement_date ?? '—'} />
+            </div>
+          </Section>
+
+          {/* Notes */}
+          <Section title="Follow-Up Note">
+            <textarea
+              id="detail-note-field"
+              value={note}
+              onChange={e => handleNoteChange(e.target.value)}
+              placeholder="Add a note… (auto-saved)"
+              className="input w-full h-28 resize-none text-sm"
+            />
+            {note && (
+              <p className="text-xs text-green-500 mt-1">✓ Saved to browser</p>
+            )}
+          </Section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+function DataRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between py-1 border-b border-surface-700/50">
+      <span className="text-xs text-muted">{label}</span>
+      <span className="text-xs font-mono text-gray-300">{value}</span>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, sub, warn }: { label: string; value: string; sub: string; warn?: boolean }) {
+  return (
+    <div className={`rounded-lg p-3 border ${warn ? 'bg-red-900/15 border-red-800/40' : 'bg-surface-700 border-surface-600'}`}>
+      <p className="text-xs text-muted mb-1">{label}</p>
+      <p className={`text-lg font-bold font-mono ${warn ? 'text-red-400' : 'text-gray-200'}`}>{value}</p>
+      {sub && <p className="text-xs text-muted mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
+
+===== FILE: src/index.css =====
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-surface-900 text-gray-100;
+  }
+
+  body {
+    @apply min-h-screen font-sans antialiased;
+    background-color: #0d1117;
+  }
+
+  * {
+    @apply border-surface-600;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-800;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-500 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-600;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface-800 border border-surface-600 rounded-lg;
+  }
+
+  .btn-primary {
+    @apply bg-accent hover:bg-accent-hover text-white font-medium px-4 py-2 rounded-md transition-colors duration-150 text-sm;
+  }
+
+  .btn-secondary {
+    @apply bg-surface-700 hover:bg-surface-600 text-gray-200 font-medium px-4 py-2 rounded-md transition-colors duration-150 text-sm border border-surface-500;
+  }
+
+  .btn-ghost {
+    @apply text-gray-400 hover:text-gray-200 hover:bg-surface-700 px-3 py-1.5 rounded-md transition-colors duration-150 text-sm;
+  }
+
+  .input {
+    @apply bg-surface-700 border border-surface-500 rounded-md px-3 py-2 text-sm text-gray-100 placeholder-muted focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition-colors;
+  }
+
+  .select {
+    @apply bg-surface-700 border border-surface-500 rounded-md px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition-colors;
+  }
+
+  .badge-critical {
+    @apply bg-red-900/60 text-red-400 border border-red-800 text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+
+  .badge-high {
+    @apply bg-orange-900/60 text-orange-400 border border-orange-800 text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+
+  .badge-medium {
+    @apply bg-yellow-900/60 text-yellow-400 border border-yellow-800 text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+
+  .badge-low {
+    @apply bg-green-900/60 text-green-400 border border-green-800 text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+
+  .badge-none {
+    @apply bg-surface-700 text-muted border border-surface-500 text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+
+  .status-new {
+    @apply bg-blue-900/50 text-blue-300 border border-blue-700;
+  }
+
+  .status-in-review {
+    @apply bg-purple-900/50 text-purple-300 border border-purple-700;
+  }
+
+  .status-waiting {
+    @apply bg-yellow-900/50 text-yellow-300 border border-yellow-700;
+  }
+
+  .status-resolved {
+    @apply bg-green-900/50 text-green-300 border border-green-700;
+  }
+}
+
+@layer utilities {
+  .glow-accent {
+    box-shadow: 0 0 20px rgba(37, 99, 235, 0.15);
+  }
+}
+
+
+===== FILE: tailwind.config.js =====
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+      },
+      colors: {
+        surface: {
+          900: '#0d1117',
+          800: '#161b22',
+          700: '#21262d',
+          600: '#30363d',
+          500: '#3d444e',
+        },
+        accent: {
+          DEFAULT: '#2563eb',
+          hover: '#1d4ed8',
+          muted: '#1e3a6e',
+        },
+        critical: '#ef4444',
+        high: '#f97316',
+        medium: '#eab308',
+        low: '#22c55e',
+        muted: '#6e7681',
+      },
+    },
+  },
+  plugins: [],
+}
+
+
+===== FILE: vite.config.ts =====
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+
+
+===== FILE: tsconfig.json =====
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+
+
+===== FILE: package.json =====
+{
+  "name": "opslens",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@types/papaparse": "^5.5.2",
+    "papaparse": "^5.5.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.15",
+    "@types/react-dom": "^18.2.7",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vitejs/plugin-react": "^4.0.3",
+    "autoprefixer": "^10.4.27",
+    "eslint": "^8.45.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.3",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5"
+  }
+}
+
+
