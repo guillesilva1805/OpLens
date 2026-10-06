@@ -1,4 +1,5 @@
 import type { RawInventoryRecord } from '../types';
+import type { TFn } from '../i18n';
 
 /**
  * A raw record that has been normalized and annotated.
@@ -24,11 +25,11 @@ export interface SanitizedRecord extends RawInventoryRecord {
  * "Sometimes AI uses partial and incomplete data and assumes."
  * We make the gap explicit instead.
  */
-function flagIfUnparseable(raw: unknown, fieldName: string, flags: string[]): void {
+function flagIfUnparseable(raw: unknown, fieldName: string, flags: string[], t: TFn): void {
   if (raw === undefined || raw === null || raw === '') return; // absent is handled separately
   if (isNaN(Number(raw))) {
     const display = String(raw).substring(0, 40);
-    flags.push(`${fieldName}: "${display}" is not a valid number — treated as missing for all calculations`);
+    flags.push(t('flag.unparseable', { field: fieldName, value: display }));
   }
 }
 
@@ -46,41 +47,41 @@ function flagIfUnparseable(raw: unknown, fieldName: string, flags: string[]): vo
  *   - Block records from entering the exception engine (even dirty records proceed,
  *     so they can be surfaced as manual_review exceptions)
  */
-export function sanitizeRecord(r: RawInventoryRecord): SanitizedRecord {
+export function sanitizeRecord(r: RawInventoryRecord, t: TFn): SanitizedRecord {
   const flags: string[] = [];
 
   // ── SKU ─────────────────────────────────────────────────────────────────────
   const rawSku = String(r.sku ?? '');
   const trimmedSku = rawSku.trim();
   const normalizedSku = trimmedSku.toUpperCase();
-  if (trimmedSku !== rawSku) flags.push('SKU: leading/trailing whitespace removed');
-  if (normalizedSku !== trimmedSku) flags.push('SKU: normalized to uppercase for consistent matching');
+  if (trimmedSku !== rawSku) flags.push(t('flag.skuTrim'));
+  if (normalizedSku !== trimmedSku) flags.push(t('flag.skuUpper'));
 
   // ── Location ────────────────────────────────────────────────────────────────
   const rawLoc = String(r.location ?? '');
   const trimmedLoc = rawLoc.trim();
-  if (trimmedLoc !== rawLoc) flags.push('location: leading/trailing whitespace removed');
+  if (trimmedLoc !== rawLoc) flags.push(t('flag.locTrim'));
 
   // ── Numeric fields: flag provided-but-unparseable values ───────────────────
-  flagIfUnparseable(r.on_hand_qty,     'on_hand_qty',     flags);
-  flagIfUnparseable(r.reorder_point,   'reorder_point',   flags);
-  flagIfUnparseable(r.safety_stock,    'safety_stock',    flags);
-  flagIfUnparseable(r.avg_daily_usage, 'avg_daily_usage', flags);
-  flagIfUnparseable(r.lead_time_days,  'lead_time_days',  flags);
-  flagIfUnparseable(r.system_qty,      'system_qty',      flags);
-  flagIfUnparseable(r.counted_qty,     'counted_qty',     flags);
-  flagIfUnparseable(r.open_po_qty,     'open_po_qty',     flags);
+  flagIfUnparseable(r.on_hand_qty,     'on_hand_qty',     flags, t);
+  flagIfUnparseable(r.reorder_point,   'reorder_point',   flags, t);
+  flagIfUnparseable(r.safety_stock,    'safety_stock',    flags, t);
+  flagIfUnparseable(r.avg_daily_usage, 'avg_daily_usage', flags, t);
+  flagIfUnparseable(r.lead_time_days,  'lead_time_days',  flags, t);
+  flagIfUnparseable(r.system_qty,      'system_qty',      flags, t);
+  flagIfUnparseable(r.counted_qty,     'counted_qty',     flags, t);
+  flagIfUnparseable(r.open_po_qty,     'open_po_qty',     flags, t);
 
   // ── Numeric fields: flag semantically invalid values ────────────────────────
   const onHand = Number(r.on_hand_qty);
   if (!isNaN(onHand) && onHand < 0) {
-    flags.push('on_hand_qty: negative value recorded — exception results should be treated with caution');
+    flags.push(t('flag.onHandNegative'));
   }
 
   const avgUsage = Number(r.avg_daily_usage);
   if (!isNaN(avgUsage) && avgUsage < 0) {
     // avg_daily_usage <= 0 causes exceptionEngine to skip stockout + days-of-cover
-    flags.push('avg_daily_usage: negative — stockout risk and days-of-cover calculations will be skipped');
+    flags.push(t('flag.usageNegative'));
   }
 
   // ── Financial / Cost ────────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ export function sanitizeRecord(r: RawInventoryRecord): SanitizedRecord {
     const rawC = String(r.unit_cost).replace(/[^0-9.-]/g, '');
     const c = Number(rawC);
     if (isNaN(c) || c < 0) {
-      flags.push('unit_cost: invalid or negative — using conservative $25 estimate');
+      flags.push(t('flag.unitCostInvalid'));
       finalCost = 25;
       isEstimated = true;
     } else {
@@ -104,7 +105,7 @@ export function sanitizeRecord(r: RawInventoryRecord): SanitizedRecord {
   // ── Date field ──────────────────────────────────────────────────────────────
   const rawDate = typeof r.last_movement_date === 'string' ? r.last_movement_date.trim() : '';
   if (rawDate && isNaN(new Date(rawDate).getTime())) {
-    flags.push(`last_movement_date: "${rawDate.substring(0, 40)}" is not a valid date — aging calculation will be skipped`);
+    flags.push(t('flag.dateInvalid', { value: rawDate.substring(0, 40) }));
   }
 
   return {
@@ -120,6 +121,6 @@ export function sanitizeRecord(r: RawInventoryRecord): SanitizedRecord {
   };
 }
 
-export function sanitizeRecords(raw: RawInventoryRecord[]): SanitizedRecord[] {
-  return raw.map(sanitizeRecord);
+export function sanitizeRecords(raw: RawInventoryRecord[], t: TFn): SanitizedRecord[] {
+  return raw.map(r => sanitizeRecord(r, t));
 }

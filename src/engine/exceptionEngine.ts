@@ -1,6 +1,7 @@
 import type { RawInventoryRecord, ProcessedRecord, ExceptionType, Priority, Status } from '../types';
 import { getNote, getStatus, getCaseMetadata } from '../storage/localStore';
 import { sanitizeRecords } from './preprocessor';
+import { translate, type Lang, type TFn } from '../i18n/translations';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -43,7 +44,8 @@ interface ExceptionResult {
 function checkLowStock(
   on_hand_qty: number | null,
   reorder_point: number | null,
-  safety_stock: number | null
+  safety_stock: number | null,
+  t: TFn
 ): ExceptionResult | null {
   if (on_hand_qty === null) return null;
   const threshold = reorder_point ?? safety_stock;
@@ -55,8 +57,10 @@ function checkLowStock(
     return {
       type: 'low_stock',
       priority,
-      reason: `On hand (${on_hand_qty}) is at or below ${reorder_point !== null ? `reorder point (${reorder_point})` : `safety stock (${safety_stock})`}`,
-      suggested_action: 'Create replenishment order or expedite open PO',
+      reason: reorder_point !== null
+        ? t('engine.lowStock.reasonRop', { onHand: on_hand_qty, threshold: reorder_point })
+        : t('engine.lowStock.reasonSs', { onHand: on_hand_qty, threshold: safety_stock }),
+      suggested_action: t('engine.lowStock.action'),
     };
   }
   return null;
@@ -65,7 +69,8 @@ function checkLowStock(
 function checkStockoutRisk(
   on_hand_qty: number | null,
   avg_daily_usage: number | null,
-  lead_time_days: number | null
+  lead_time_days: number | null,
+  t: TFn
 ): { result: ExceptionResult | null; days_of_cover: number | null } {
   if (on_hand_qty === null || avg_daily_usage === null || avg_daily_usage <= 0) {
     return { result: null, days_of_cover: null };
@@ -80,8 +85,10 @@ function checkStockoutRisk(
       result: {
         type: 'stockout_risk',
         priority,
-        reason: `Days of cover (${days_of_cover}d) is less than ${lead_time_days !== null ? `lead time (${lead_time_days}d)` : 'default threshold (7d)'}`,
-        suggested_action: 'Expedite replenishment — stockout risk within lead time window',
+        reason: lead_time_days !== null
+          ? t('engine.stockout.reasonLead', { doc: days_of_cover, lead: lead_time_days })
+          : t('engine.stockout.reasonDefault', { doc: days_of_cover }),
+        suggested_action: t('engine.stockout.action'),
       },
       days_of_cover,
     };
@@ -91,7 +98,8 @@ function checkStockoutRisk(
 
 function checkCountMismatch(
   system_qty: number | null,
-  counted_qty: number | null
+  counted_qty: number | null,
+  t: TFn
 ): ExceptionResult | null {
   if (system_qty === null || counted_qty === null) return null;
   if (system_qty === counted_qty) return null;
@@ -103,13 +111,18 @@ function checkCountMismatch(
   return {
     type: 'count_mismatch',
     priority,
-    reason: `System qty (${system_qty}) does not match counted qty (${counted_qty}) — variance of ${counted_qty - system_qty > 0 ? '+' : ''}${counted_qty - system_qty} units`,
-    suggested_action: 'Investigate discrepancy and perform recount or inventory adjustment',
+    reason: t('engine.mismatch.reason', {
+      system: system_qty,
+      counted: counted_qty,
+      variance: `${counted_qty - system_qty > 0 ? '+' : ''}${counted_qty - system_qty}`,
+    }),
+    suggested_action: t('engine.mismatch.action'),
   };
 }
 
 function checkAging(
-  last_movement_date: string | null
+  last_movement_date: string | null,
+  t: TFn
 ): { result: ExceptionResult | null; aging_days: number | null } {
   if (!last_movement_date) return { result: null, aging_days: null };
   const d = parseDate(last_movement_date);
@@ -123,8 +136,8 @@ function checkAging(
     result: {
       type: 'aging',
       priority,
-      reason: `No movement recorded for ${aging_days} days (last: ${last_movement_date})`,
-      suggested_action: 'Review for markdown, return, or write-off',
+      reason: t('engine.aging.reason', { days: aging_days, date: last_movement_date }),
+      suggested_action: t('engine.aging.action'),
     },
     aging_days,
   };
@@ -143,50 +156,56 @@ function checkManualReview(record: {
   raw_counted_qty: unknown;
   raw_avg_daily_usage: unknown;
   raw_last_movement_date: unknown;
-}): ExceptionResult | null {
+}, t: TFn): ExceptionResult | null {
   const issues: string[] = [];
 
-  if (!record.sku || record.sku.trim() === '') issues.push('missing SKU');
-  if (!record.location || record.location.trim() === '') issues.push('missing location');
+  const missingSku = !record.sku || record.sku.trim() === '';
+  const missingLocation = !record.location || record.location.trim() === '';
+  if (missingSku) issues.push(t('issue.missingSku'));
+  if (missingLocation) issues.push(t('issue.missingLocation'));
 
   if (record.raw_on_hand_qty !== undefined && record.raw_on_hand_qty !== null && record.raw_on_hand_qty !== '') {
-    if (record.on_hand_qty === null) issues.push('invalid on_hand_qty');
-    else if (record.on_hand_qty < 0) issues.push('negative on_hand_qty');
+    if (record.on_hand_qty === null) issues.push(t('issue.invalidOnHand'));
+    else if (record.on_hand_qty < 0) issues.push(t('issue.negativeOnHand'));
   } else {
-    issues.push('missing on_hand_qty');
+    issues.push(t('issue.missingOnHand'));
   }
 
   if (record.raw_system_qty !== undefined && record.raw_system_qty !== null && record.raw_system_qty !== '') {
-    if (record.system_qty !== null && record.system_qty < 0) issues.push('negative system_qty');
+    if (record.system_qty !== null && record.system_qty < 0) issues.push(t('issue.negativeSystem'));
   }
   if (record.raw_counted_qty !== undefined && record.raw_counted_qty !== null && record.raw_counted_qty !== '') {
-    if (record.counted_qty !== null && record.counted_qty < 0) issues.push('negative counted_qty');
+    if (record.counted_qty !== null && record.counted_qty < 0) issues.push(t('issue.negativeCounted'));
   }
   if (record.raw_avg_daily_usage !== undefined && record.raw_avg_daily_usage !== null && record.raw_avg_daily_usage !== '') {
-    if (record.avg_daily_usage !== null && record.avg_daily_usage < 0) issues.push('negative avg_daily_usage');
+    if (record.avg_daily_usage !== null && record.avg_daily_usage < 0) issues.push(t('issue.negativeUsage'));
   }
 
   if (record.raw_last_movement_date && typeof record.raw_last_movement_date === 'string' && record.raw_last_movement_date.trim() !== '') {
-    if (!parseDate(record.raw_last_movement_date)) issues.push('invalid last_movement_date');
+    if (!parseDate(record.raw_last_movement_date)) issues.push(t('issue.invalidDate'));
   }
 
   if (issues.length === 0) return null;
 
-  const hasIdentityIssue = issues.some(i => i.includes('SKU') || i.includes('location'));
+  const hasIdentityIssue = missingSku || missingLocation;
   return {
     type: 'manual_review',
     priority: hasIdentityIssue ? 'high' : 'medium',
-    reason: `Record has data quality issues: ${issues.join(', ')} — review required`,
-    suggested_action: 'Correct data entry issues before acting on this record',
+    reason: t('engine.manual.reason', { issues: issues.join(', ') }),
+    suggested_action: t('engine.manual.action'),
   };
 }
 
 // ─── Main Engine ───────────────────────────────────────────────────────────
 
-export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
+export function processRecords(raw: RawInventoryRecord[], lang: Lang = 'en'): ProcessedRecord[] {
+  // Reasons, actions and flags are written in the UI language; the rules themselves
+  // (types, priorities, thresholds) do not depend on it.
+  const t: TFn = (key, params) => translate(lang, key, params);
+
   // Sanitize first: normalize strings, flag unparseable/invalid values.
   // Exception logic runs on the cleaned data; flags are surfaced in the UI.
-  const sanitized = sanitizeRecords(raw);
+  const sanitized = sanitizeRecords(raw, t);
   return sanitized.map(r => {
     const on_hand_qty = toNum(r.on_hand_qty);
     const reorder_point = toNum(r.reorder_point);
@@ -201,7 +220,7 @@ export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
     const exceptions: ExceptionResult[] = [];
 
     // Stockout risk + days_of_cover
-    const stockoutCheck = checkStockoutRisk(on_hand_qty, avg_daily_usage, lead_time_days);
+    const stockoutCheck = checkStockoutRisk(on_hand_qty, avg_daily_usage, lead_time_days, t);
     const days_of_cover = stockoutCheck.days_of_cover ??
       (on_hand_qty !== null && avg_daily_usage && avg_daily_usage > 0
         ? Math.round((on_hand_qty / avg_daily_usage) * 10) / 10
@@ -209,15 +228,15 @@ export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
     if (stockoutCheck.result) exceptions.push(stockoutCheck.result);
 
     // Low stock
-    const lowStockResult = checkLowStock(on_hand_qty, reorder_point, safety_stock);
+    const lowStockResult = checkLowStock(on_hand_qty, reorder_point, safety_stock, t);
     if (lowStockResult) exceptions.push(lowStockResult);
 
     // Count mismatch
-    const mismatchResult = checkCountMismatch(system_qty, counted_qty);
+    const mismatchResult = checkCountMismatch(system_qty, counted_qty, t);
     if (mismatchResult) exceptions.push(mismatchResult);
 
     // Aging
-    const agingCheck = checkAging(last_movement_date);
+    const agingCheck = checkAging(last_movement_date, t);
     const aging_days = agingCheck.aging_days;
     if (agingCheck.result) exceptions.push(agingCheck.result);
 
@@ -235,7 +254,7 @@ export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
       raw_counted_qty: r.counted_qty,
       raw_avg_daily_usage: r.avg_daily_usage,
       raw_last_movement_date: r.last_movement_date,
-    });
+    }, t);
     if (manualResult) exceptions.push(manualResult);
 
     // Determine primary exception (highest priority, then by type order)
@@ -279,8 +298,8 @@ export function processRecords(raw: RawInventoryRecord[]): ProcessedRecord[] {
       exception_types,
       primary_exception_type: primary?.type ?? null,
       priority: overallPriority,
-      reason: primary?.reason ?? 'No exceptions detected',
-      suggested_action: primary?.suggested_action ?? 'No action required',
+      reason: primary?.reason ?? t('engine.none.reason'),
+      suggested_action: primary?.suggested_action ?? t('engine.none.action'),
       status: getStatus(r.sku, r.location) as Status,
       note: getNote(r.sku, r.location),
       case_metadata: getCaseMetadata(r.sku, r.location),

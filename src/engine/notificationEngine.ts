@@ -1,5 +1,6 @@
 import type { ProcessedRecord, AppNotification, Priority, AlertType } from '../types';
 import { ALERT_THRESHOLDS } from '../config/alertThresholds';
+import { translate, type Lang, type TFn } from '../i18n/translations';
 import {
   getNotificationRead,
   getNotificationCreatedAt,
@@ -54,7 +55,7 @@ function buildNotification(
 
 // ─── Alert Checks ───────────────────────────────────────────────────────────
 
-function checkLowStockAlert(record: ProcessedRecord): AppNotification | null {
+function checkLowStockAlert(record: ProcessedRecord, t: TFn): AppNotification | null {
   const { on_hand_qty, reorder_point, safety_stock } = record;
 
   // Reuse stockout_risk exception data when available (highest severity)
@@ -64,8 +65,8 @@ function checkLowStockAlert(record: ProcessedRecord): AppNotification | null {
       record,
       'low_stock',
       priority,
-      `Stockout risk: ${record.sku}`,
-      `Days of cover (${record.days_of_cover ?? '?'}d) is below lead time. Expedite replenishment.`,
+      t('notif.stockoutMsg', { sku: record.sku }),
+      t('notif.stockoutReason', { doc: record.days_of_cover ?? '?' }),
     );
   }
 
@@ -73,14 +74,14 @@ function checkLowStockAlert(record: ProcessedRecord): AppNotification | null {
   if (record.exception_types.includes('low_stock')) {
     const priority: Priority =
       safety_stock !== null && on_hand_qty !== null && on_hand_qty <= safety_stock ? 'high' : 'medium';
-    const thresholdLabel =
-      reorder_point !== null ? `reorder point (${reorder_point})` : `safety stock (${safety_stock})`;
     return buildNotification(
       record,
       'low_stock',
       priority,
-      `Low stock: ${record.sku}`,
-      `On hand (${on_hand_qty}) is at or below ${thresholdLabel}.`,
+      t('notif.lowMsg', { sku: record.sku }),
+      reorder_point !== null
+        ? t('notif.lowReasonRop', { onHand: on_hand_qty, threshold: reorder_point })
+        : t('notif.lowReasonSs', { onHand: on_hand_qty, threshold: safety_stock }),
     );
   }
 
@@ -91,8 +92,8 @@ function checkLowStockAlert(record: ProcessedRecord): AppNotification | null {
         record,
         'low_stock',
         'medium',
-        `Low stock: ${record.sku}`,
-        `On hand (${on_hand_qty}) is below the fallback minimum (${ALERT_THRESHOLDS.LOW_STOCK_FALLBACK} units). No reorder point is defined for this SKU.`,
+        t('notif.lowMsg', { sku: record.sku }),
+        t('notif.lowReasonFallback', { onHand: on_hand_qty, min: ALERT_THRESHOLDS.LOW_STOCK_FALLBACK }),
       );
     }
   }
@@ -100,22 +101,19 @@ function checkLowStockAlert(record: ProcessedRecord): AppNotification | null {
   return null;
 }
 
-function checkHighStockAlert(record: ProcessedRecord): AppNotification | null {
+function checkHighStockAlert(record: ProcessedRecord, t: TFn): AppNotification | null {
   const { on_hand_qty, reorder_point } = record;
   if (on_hand_qty === null) return null;
 
   let overstockThreshold: number;
-  let thresholdLabel: string;
 
   if (reorder_point !== null) {
     // No explicit max stock field exists in the data model. We use ROP × multiplier as a
     // rough heuristic: holding more than ~3× the reorder quantity suggests excess inventory.
     // Adjust HIGH_STOCK_ROP_MULTIPLIER in alertThresholds.ts to match your policy.
     overstockThreshold = reorder_point * ALERT_THRESHOLDS.HIGH_STOCK_ROP_MULTIPLIER;
-    thresholdLabel = `${ALERT_THRESHOLDS.HIGH_STOCK_ROP_MULTIPLIER}× reorder point — estimated max (${overstockThreshold} units, heuristic)`;
   } else {
     overstockThreshold = ALERT_THRESHOLDS.HIGH_STOCK_FALLBACK;
-    thresholdLabel = `absolute fallback threshold (${ALERT_THRESHOLDS.HIGH_STOCK_FALLBACK} units — no reorder point defined)`;
   }
 
   if (on_hand_qty > overstockThreshold) {
@@ -124,15 +122,22 @@ function checkHighStockAlert(record: ProcessedRecord): AppNotification | null {
       record,
       'high_stock',
       'medium',
-      `Overstock: ${record.sku}`,
-      `On hand (${on_hand_qty}) exceeds ${thresholdLabel} by ${excess} units. Review for reallocation, promotions, or return to supplier.`,
+      t('notif.overMsg', { sku: record.sku }),
+      reorder_point !== null
+        ? t('notif.overReasonRop', {
+            onHand: on_hand_qty,
+            mult: ALERT_THRESHOLDS.HIGH_STOCK_ROP_MULTIPLIER,
+            threshold: overstockThreshold,
+            excess,
+          })
+        : t('notif.overReasonFallback', { onHand: on_hand_qty, threshold: overstockThreshold, excess }),
     );
   }
 
   return null;
 }
 
-function checkSlowMovementAlert(record: ProcessedRecord): AppNotification | null {
+function checkSlowMovementAlert(record: ProcessedRecord, t: TFn): AppNotification | null {
   const { aging_days } = record;
   // aging_days is already computed by the exception engine from last_movement_date.
   //
@@ -151,8 +156,8 @@ function checkSlowMovementAlert(record: ProcessedRecord): AppNotification | null
     record,
     'slow_movement',
     priority,
-    `Slow movement: ${record.sku}`,
-    `Demand has been inactive for ${aging_days} days, exceeding the ${ALERT_THRESHOLDS.SLOW_MOVEMENT_DAYS}-day slow-movement threshold. Review holding costs and consider promotions, reallocation, or markdown to improve stock velocity.`,
+    t('notif.slowMsg', { sku: record.sku }),
+    t('notif.slowReason', { days: aging_days, threshold: ALERT_THRESHOLDS.SLOW_MOVEMENT_DAYS }),
   );
 }
 
@@ -167,20 +172,21 @@ function checkSlowMovementAlert(record: ProcessedRecord): AppNotification | null
  * - When a condition clears, its notification is simply absent from the next result — no
  *   explicit cleanup needed.
  */
-export function generateNotifications(records: ProcessedRecord[]): AppNotification[] {
+export function generateNotifications(records: ProcessedRecord[], lang: Lang = 'en'): AppNotification[] {
+  const t: TFn = (key, params) => translate(lang, key, params);
   const notifications: AppNotification[] = [];
 
   for (const record of records) {
     // Skip records with no usable on_hand data (data quality issues handled by separate exception)
     if (record.on_hand_qty === null && !record.exception_types.includes('aging')) continue;
 
-    const lowStock = checkLowStockAlert(record);
+    const lowStock = checkLowStockAlert(record, t);
     if (lowStock) notifications.push(lowStock);
 
-    const highStock = checkHighStockAlert(record);
+    const highStock = checkHighStockAlert(record, t);
     if (highStock) notifications.push(highStock);
 
-    const slowMovement = checkSlowMovementAlert(record);
+    const slowMovement = checkSlowMovementAlert(record, t);
     if (slowMovement) notifications.push(slowMovement);
   }
 

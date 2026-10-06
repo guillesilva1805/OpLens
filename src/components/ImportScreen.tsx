@@ -2,6 +2,8 @@ import React, { useRef, useState } from 'react';
 import Papa from 'papaparse';
 import type { RawInventoryRecord } from '../types';
 import demoInventory from '../data/demoInventory';
+import { useI18n } from '../i18n';
+import gsLogo from '../assets/gs-logo.png';
 
 interface Props {
   onDataLoaded: (records: RawInventoryRecord[], source: 'demo' | 'csv') => void;
@@ -15,6 +17,7 @@ const OPTIONAL_COLUMNS = [
 ];
 
 export default function ImportScreen({ onDataLoaded }: Props) {
+  const { t } = useI18n();
   const [isDragging, setIsDragging] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [parseWarnings, setParseWarnings] = useState<string[]>([]);
@@ -34,7 +37,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
     setParsedInfo(null);
 
     if (!file.name.endsWith('.csv')) {
-      setParseError('Only CSV files are supported. Please upload a .csv file.');
+      setParseError(t('import.errOnlyCsv'));
       return;
     }
 
@@ -48,7 +51,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
 
         const missingRequired = REQUIRED_COLUMNS.filter(c => !cols.map(c => c.toLowerCase().trim()).includes(c));
         if (missingRequired.length > 0) {
-          setParseError(`Missing required columns: ${missingRequired.join(', ')}. Your CSV must include: sku, location, on_hand_qty.`);
+          setParseError(t('import.errMissingRequired', { missing: missingRequired.join(', '), cols: REQUIRED_COLUMNS.join(', ') }));
           return;
         }
 
@@ -56,11 +59,11 @@ export default function ImportScreen({ onDataLoaded }: Props) {
         const missingOptional = OPTIONAL_COLUMNS.filter(c => !cols.map(c => c.toLowerCase().trim()).includes(c));
 
         if (missingOptional.length > 0) {
-          warnings.push(`Optional columns not found (exception logic will be partially applied): ${missingOptional.join(', ')}`);
+          warnings.push(t('import.warnMissingOptional', { cols: missingOptional.join(', ') }));
         }
 
         if (result.data.length === 0) {
-          setParseError('The CSV file contains no data rows.');
+          setParseError(t('import.errNoRows'));
           return;
         }
 
@@ -81,7 +84,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
         }, 1200);
       },
       error: (err) => {
-        setParseError(`Parse error: ${err.message}`);
+        setParseError(t('import.errParse', { msg: err.message }));
       },
     });
   }
@@ -104,13 +107,13 @@ export default function ImportScreen({ onDataLoaded }: Props) {
       <div className="text-center mb-12">
         <div className="inline-flex items-center gap-2 bg-accent-muted border border-accent/30 rounded-full px-4 py-1.5 text-xs text-blue-300 font-medium mb-6">
           <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
-          Warehouse Exception Tracker
+          {t('import.badge')}
         </div>
         <h1 className="text-4xl font-bold text-white mb-3 tracking-tight">
           OpsLens
         </h1>
         <p className="text-muted text-base max-w-sm mx-auto leading-relaxed">
-          Surface inventory exceptions, prioritize action, and track follow-up — all in the browser.
+          {t('import.tagline')}
         </p>
       </div>
 
@@ -129,11 +132,11 @@ export default function ImportScreen({ onDataLoaded }: Props) {
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-white font-semibold">Use Demo Data</span>
-                <span className="text-xs bg-blue-900/60 text-blue-300 border border-blue-700/50 rounded px-2 py-0.5">Recommended</span>
+                <span className="text-white font-semibold">{t('import.useDemo')}</span>
+                <span className="text-xs bg-blue-900/60 text-blue-300 border border-blue-700/50 rounded px-2 py-0.5">{t('import.recommended')}</span>
               </div>
               <p className="text-sm text-muted">
-                28 SKUs across Footwear, Accessories, and Packaging — covering all five exception types with realistic quantities, dates, and data quality issues.
+                {t('import.demoDesc')}
               </p>
             </div>
             <svg className="w-5 h-5 text-muted group-hover:text-accent transition-colors flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -145,7 +148,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
         {/* Divider */}
         <div className="flex items-center gap-3">
           <div className="flex-1 border-t border-surface-600"></div>
-          <span className="text-xs text-muted uppercase tracking-wider">or upload your own</span>
+          <span className="text-xs text-muted uppercase tracking-wider">{t('import.orUpload')}</span>
           <div className="flex-1 border-t border-surface-600"></div>
         </div>
 
@@ -177,9 +180,9 @@ export default function ImportScreen({ onDataLoaded }: Props) {
             </svg>
           </div>
           <p className="text-sm text-gray-300 font-medium mb-1">
-            {isDragging ? 'Drop your CSV here' : 'Drop CSV here or click to browse'}
+            {isDragging ? t('import.dropHere') : t('import.dropOrBrowse')}
           </p>
-          <p className="text-xs text-muted">Required columns: sku, location, on_hand_qty</p>
+          <p className="text-xs text-muted">{t('import.requiredCols', { cols: REQUIRED_COLUMNS.join(', ') })}</p>
         </div>
 
         {/* Parse error */}
@@ -190,7 +193,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div>
-                <p className="text-sm text-red-300 font-medium">Parse Error</p>
+                <p className="text-sm text-red-300 font-medium">{t('import.parseError')}</p>
                 <p className="text-xs text-red-400 mt-0.5">{parseError}</p>
               </div>
             </div>
@@ -200,7 +203,7 @@ export default function ImportScreen({ onDataLoaded }: Props) {
         {/* Parse warnings */}
         {parseWarnings.length > 0 && (
           <div className="card p-4 border-yellow-800/50 bg-yellow-900/10">
-            <p className="text-xs text-yellow-400 font-medium mb-1">Warnings</p>
+            <p className="text-xs text-yellow-400 font-medium mb-1">{t('import.warnings')}</p>
             {parseWarnings.map((w, i) => (
               <p key={i} className="text-xs text-yellow-500">{w}</p>
             ))}
@@ -215,8 +218,8 @@ export default function ImportScreen({ onDataLoaded }: Props) {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div>
-                <p className="text-sm text-green-300 font-medium">File accepted — running exception scan</p>
-                <p className="text-xs text-green-500">{parsedInfo.rows} records · {parsedInfo.cols.length} columns recognized — navigating to dashboard…</p>
+                <p className="text-sm text-green-300 font-medium">{t('import.fileAccepted')}</p>
+                <p className="text-xs text-green-500">{t('import.parsedInfo', { rows: parsedInfo.rows, cols: parsedInfo.cols.length })}</p>
               </div>
             </div>
           </div>
@@ -224,17 +227,23 @@ export default function ImportScreen({ onDataLoaded }: Props) {
 
         {/* Column reference */}
         <div className="card p-5">
-          <p className="text-xs text-muted font-medium uppercase tracking-wider mb-3">Expected CSV Columns</p>
+          <p className="text-xs text-muted font-medium uppercase tracking-wider mb-3">{t('import.expectedCols')}</p>
           <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
             {[...REQUIRED_COLUMNS.map(c => ({ col: c, req: true })),
               ...OPTIONAL_COLUMNS.map(c => ({ col: c, req: false }))].map(({ col, req }) => (
               <div key={col} className="flex items-center gap-2">
                 <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${req ? 'bg-blue-400' : 'bg-surface-500'}`}></span>
                 <code className="text-xs font-mono text-gray-300">{col}</code>
-                {req && <span className="text-xs text-blue-500">required</span>}
+                {req && <span className="text-xs text-blue-500">{t('import.required')}</span>}
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Author credit */}
+        <div className="flex flex-col items-center gap-3 pt-6">
+          <span className="text-xs text-muted uppercase tracking-wider">{t('import.builtBy')}</span>
+          <img src={gsLogo} alt="Guillermo Silva — IA Aplicada" className="w-28 h-28" />
         </div>
       </div>
     </div>

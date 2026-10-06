@@ -1,4 +1,8 @@
 import type { ViewType } from '../types';
+import { useI18n, type Lang } from '../i18n';
+import gsMark from '../assets/gs-mark.png';
+
+const LANGS: Lang[] = ['es', 'en'];
 
 interface Props {
   currentView: ViewType;
@@ -13,6 +17,7 @@ interface Props {
 }
 
 export default function Navbar({ currentView, dataSource, recordCount, exceptionCount, unreadAlertCount, emailVerified, onNavigate, onNewDataSource, onOpenEmailSettings }: Props) {
+  const { t, lang, setLang } = useI18n();
   return (
     <nav className="bg-surface-800 border-b border-surface-600 px-4 py-0 flex-shrink-0">
       <div className="max-w-screen-2xl mx-auto flex items-center h-12">
@@ -22,11 +27,11 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
           className="flex items-center gap-2.5 mr-8 group"
           id="nav-logo"
         >
-          <div className="w-7 h-7 bg-accent rounded flex items-center justify-center group-hover:bg-accent-hover transition-colors">
-            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-            </svg>
-          </div>
+          <img
+            src={gsMark}
+            alt="Guillermo Silva"
+            className="w-8 h-8 rounded-md bg-white ring-1 ring-surface-600 group-hover:ring-accent transition-shadow"
+          />
           <span className="text-sm font-bold text-white tracking-tight">OpsLens</span>
         </button>
 
@@ -34,13 +39,13 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
         {dataSource && (
           <div className="flex items-center gap-1">
             <NavItem
-              label="Dashboard"
+              label={t('nav.dashboard')}
               active={currentView === 'dashboard'}
               onClick={() => onNavigate('dashboard')}
               id="nav-dashboard"
             />
             <NavItem
-              label={`Exception Queue ${exceptionCount > 0 ? `(${exceptionCount})` : ''}`}
+              label={`${t('nav.queue')} ${exceptionCount > 0 ? `(${exceptionCount})` : ''}`}
               active={currentView === 'queue'}
               onClick={() => onNavigate('queue')}
               id="nav-queue"
@@ -52,7 +57,7 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
         <div className="ml-auto flex items-center gap-3">
           {dataSource && (
             <span className="text-xs text-muted hidden sm:block">
-              <span className="text-surface-500 mr-1">{dataSource === 'demo' ? 'Demo data' : 'CSV upload'} ·</span>
+              <span className="text-surface-500 mr-1">{dataSource === 'demo' ? t('nav.demoData') : t('nav.csvUpload')} ·</span>
               <span className="font-mono">{recordCount} SKUs</span>
             </span>
           )}
@@ -66,7 +71,7 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
                   ? 'text-white bg-surface-700'
                   : 'text-muted hover:text-gray-300 hover:bg-surface-700'
               }`}
-              title="Alerts"
+              title={t('nav.alerts')}
               id="nav-notifications"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -85,7 +90,7 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
           <button
             onClick={onOpenEmailSettings}
             className="relative p-1.5 rounded-md transition-colors text-muted hover:text-gray-300 hover:bg-surface-700"
-            title="Email notification settings"
+            title={t('nav.emailSettings')}
             id="nav-email-settings"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -103,9 +108,31 @@ export default function Navbar({ currentView, dataSource, recordCount, exception
               className="btn-ghost text-xs"
               id="nav-new-datasource"
             >
-              New Session
+              {t('nav.newSession')}
             </button>
           )}
+
+          {/* Language switch */}
+          <div
+            className="flex items-center rounded-md border border-surface-600 bg-surface-700 p-0.5"
+            role="group"
+            aria-label={t('nav.language')}
+            id="nav-language"
+          >
+            {LANGS.map(code => (
+              <button
+                key={code}
+                id={`nav-lang-${code}`}
+                onClick={() => setLang(code)}
+                aria-pressed={lang === code}
+                className={`px-2 py-0.5 rounded text-xs font-semibold uppercase transition-colors ${
+                  lang === code ? 'bg-accent text-white' : 'text-muted hover:text-gray-200'
+                }`}
+              >
+                {code}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </nav>

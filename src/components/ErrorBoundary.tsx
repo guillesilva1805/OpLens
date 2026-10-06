@@ -1,9 +1,13 @@
 import { Component, type ReactNode } from 'react';
+import { I18nContext } from '../i18n';
 
 interface Props { children: ReactNode }
 interface State { error: Error | null }
 
 export default class ErrorBoundary extends Component<Props, State> {
+  static contextType = I18nContext;
+  declare context: React.ContextType<typeof I18nContext>;
+
   state: State = { error: null };
 
   static getDerivedStateFromError(error: Error): State {
@@ -21,13 +25,13 @@ export default class ErrorBoundary extends Component<Props, State> {
                   d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
-            <h2 className="text-white font-semibold">Something went wrong</h2>
+            <h2 className="text-white font-semibold">{this.context.t('error.title')}</h2>
             <p className="text-xs text-muted font-mono break-all">{this.state.error.message}</p>
             <button
               className="btn-primary text-sm"
               onClick={() => { this.setState({ error: null }); window.location.reload(); }}
             >
-              Reload OpsLens
+              {this.context.t('error.reload')}
             </button>
           </div>
         </div>

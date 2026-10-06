@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { VerificationStatus } from '../types';
 import { emailClient } from '../api/emailClient';
+import { useI18n } from '../i18n';
 
 interface Props {
   currentEmail: string;
@@ -19,12 +20,13 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
   const [status, setStatus] = useState<VerificationStatus>(currentStatus);
   const [error, setError] = useState('');
   const [simulating, setSimulating] = useState(false);
+  const { t } = useI18n();
 
   /* --- handlers --- */
 
   async function handleSaveEmail() {
     if (!isValidEmail(email)) {
-      setError('Please enter a valid email address.');
+      setError(t('email.invalid'));
       return;
     }
     setError('');
@@ -39,9 +41,9 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
       setSimulating(true);
       try {
         await emailClient.requestVerification(email.trim());
-        alert('Verification email sent! Please check your inbox.');
-      } catch (err: any) {
-        setError(err.message || 'Failed to send verification email');
+        alert(t('email.verificationSent'));
+      } catch {
+        setError(t('email.failedSend'));
       } finally {
         setSimulating(false);
       }
@@ -53,9 +55,9 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
     setSimulating(true);
     try {
       await emailClient.requestVerification(email.trim());
-      alert('Verification link resent!');
-    } catch(err: any) {
-      setError(err.message || 'Failed to resend');
+      alert(t('email.resent'));
+    } catch {
+      setError(t('email.failedResend'));
     } finally {
       setSimulating(false);
     }
@@ -76,9 +78,9 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
   }[status];
 
   const badgeLabel = {
-    unverified: 'Not set',
-    pending: 'Pending verification',
-    verified: '✓ Verified',
+    unverified: t('email.notSet'),
+    pending: t('email.pending'),
+    verified: t('email.verified'),
   }[status];
 
   return (
@@ -102,9 +104,9 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
             </svg>
-            Email address
+            {t('email.address')}
           </h2>
-          <button onClick={onClose} className="text-muted hover:text-gray-200 transition-colors" id="email-modal-close" aria-label="Close">
+          <button onClick={onClose} className="text-muted hover:text-gray-200 transition-colors" id="email-modal-close" aria-label={t('app.close')}>
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -123,7 +125,7 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
 
         {/* Input */}
         <label className="block text-xs text-muted mb-1.5 font-medium" htmlFor="email-input">
-          Email address
+          {t('email.address')}
         </label>
         <input
           id="email-input"
@@ -143,16 +145,15 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
               <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
               </svg>
-              <span>Verification Email Sent</span>
+              <span>{t('email.sentTitle')}</span>
             </div>
             <p className="ml-6">
-              A secure verification link has been sent to your email address. 
-              Click the link in the email to activate your account.
+              {t('email.sentBody')}
             </p>
           </div>
         ) : (
           <p className="text-xs text-muted mt-2 mb-5 leading-relaxed">
-            Enter the address that should receive exception alerts and daily digests.
+            {t('email.enterAddress')}
           </p>
         )}
 
@@ -165,7 +166,7 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
             disabled={simulating}
             className="btn-primary text-xs"
           >
-            {simulating ? 'Processing...' : 'Save address'}
+            {simulating ? t('email.processing') : t('email.saveAddress')}
           </button>
 
           {status === 'pending' && (
@@ -175,7 +176,7 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
               disabled={simulating}
               className="btn-secondary text-xs"
             >
-              Resend link
+              {t('email.resendLink')}
             </button>
           )}
 
@@ -185,7 +186,7 @@ export default function EmailVerificationModal({ currentEmail, currentStatus, on
               onClick={handleClearEmail}
               className="btn-ghost text-xs text-red-400 hover:text-red-300"
             >
-              Remove email
+              {t('email.removeEmail')}
             </button>
           )}
         </div>

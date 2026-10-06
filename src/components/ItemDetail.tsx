@@ -3,8 +3,9 @@ import type { ProcessedRecord, Status, CaseMetadata, RootCauseCategory } from '.
 import { DEFAULT_CASE_METADATA } from '../types';
 import {
   getPriorityBadgeClass, getPriorityLabel, getExceptionLabel, getExceptionColor,
-  getStatusClass, formatNum,
+  getStatusClass, getStatusLabel, formatNum,
 } from '../utils/ui';
+import { useI18n } from '../i18n';
 import { saveNote, saveStatus, saveCaseMetadata } from '../storage/localStore';
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
 const STATUSES: Status[] = ['New', 'In Review', 'Waiting', 'Resolved'];
 
 export default function ItemDetail({ record, onClose, onUpdate }: Props) {
+  const { t } = useI18n();
   const [note, setNote] = useState(record.note);
   const [status, setStatus] = useState<Status>(record.status);
   const [meta, setMeta] = useState<CaseMetadata>(record.case_metadata ?? DEFAULT_CASE_METADATA);
@@ -105,14 +107,14 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               <svg className="w-4 h-4 text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span className="text-sm text-green-300 font-medium">Marked as resolved — exception details kept for reference</span>
+              <span className="text-sm text-green-300 font-medium">{t('detail.resolvedBanner')}</span>
             </div>
           )}
 
           {/* Priority + status */}
           <div className="flex items-center gap-3">
             <span className={`${getPriorityBadgeClass(record.priority)} text-xs px-3 py-1`}>
-              {getPriorityLabel(record.priority)} Priority
+              {t('detail.priorityBadge', { priority: getPriorityLabel(record.priority, t) })}
             </span>
             <select
               id="detail-status-select"
@@ -120,13 +122,13 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               onChange={e => handleStatusChange(e.target.value as Status)}
               className={`text-xs rounded px-2 py-1 border font-medium bg-transparent cursor-pointer ${getStatusClass(status)}`}
             >
-              {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+              {STATUSES.map(s => <option key={s} value={s}>{getStatusLabel(s, t)}</option>)}
             </select>
           </div>
 
           {/* Preprocessing notes — only shown when data quality issues were found during sanitization */}
           {record.validation_flags.length > 0 && (
-            <Section title="Preprocessing Notes">
+            <Section title={t('detail.preprocessingNotes')}>
               <div className="space-y-1.5">
                 {record.validation_flags.map((flag, i) => (
                   <div key={i} className="flex items-start gap-2">
@@ -136,24 +138,24 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
                 ))}
               </div>
               <p className="text-xs text-muted mt-2 pt-2 border-t border-surface-700/50">
-                Fields affected above were normalized before exception logic ran. Calculations depending on those fields may be limited or skipped.
+                {t('detail.preprocessingHint')}
               </p>
             </Section>
           )}
 
           {/* Exception types */}
-          <Section title="Exception Details">
+          <Section title={t('detail.exceptionDetails')}>
             {record.exception_types.length === 0 ? (
-              <p className="text-sm text-green-400">✓ No exceptions detected</p>
+              <p className="text-sm text-green-400">{t('detail.noExceptions')}</p>
             ) : (
               <div className="space-y-3">
                 {record.exception_types.map(type => (
                   <div key={type} className="flex items-center gap-2">
                     <span className={`text-xs font-semibold ${getExceptionColor(type)} w-36 flex-shrink-0`}>
-                      {getExceptionLabel(type)}
+                      {getExceptionLabel(type, t)}
                     </span>
                     <span className="text-xs text-muted">
-                      {type === record.primary_exception_type ? '← primary' : ''}
+                      {type === record.primary_exception_type ? t('detail.primary') : ''}
                     </span>
                   </div>
                 ))}
@@ -163,14 +165,14 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
 
           {/* Why flagged */}
           {record.primary_exception_type && (
-            <Section title="Why This Was Flagged">
+            <Section title={t('detail.whyFlagged')}>
               <p className="text-sm text-gray-300 leading-relaxed">{record.reason}</p>
             </Section>
           )}
 
           {/* Suggested action */}
           {record.primary_exception_type && (
-            <Section title="Suggested Action">
+            <Section title={t('detail.suggestedAction')}>
               <div className="flex items-start gap-3 bg-accent-muted/30 border border-accent/20 rounded-lg p-3">
                 <svg className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -181,29 +183,29 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
           )}
 
           {/* Computed metrics */}
-          <Section title="Calculated Metrics">
+          <Section title={t('detail.calcMetrics')}>
             <div className="grid grid-cols-2 gap-3">
               {record.days_of_cover !== null && (
                 <MetricCard
-                  label="Days of Cover"
-                  value={`${formatNum(record.days_of_cover, 1)} days`}
-                  sub={record.lead_time_days !== null ? `vs ${record.lead_time_days}d lead time` : 'vs 7d default'}
+                  label={t('detail.daysOfCover')}
+                  value={t('detail.nDays', { n: formatNum(record.days_of_cover, 1) })}
+                  sub={record.lead_time_days !== null ? t('detail.vsLeadTime', { n: record.lead_time_days }) : t('detail.vsDefault')}
                   warn={record.days_of_cover < (record.lead_time_days ?? 7)}
                 />
               )}
               {record.aging_days !== null && (
                 <MetricCard
-                  label="Days Since Movement"
-                  value={`${record.aging_days} days`}
+                  label={t('detail.daysSinceMovement')}
+                  value={t('detail.nDays', { n: record.aging_days })}
                   sub={record.last_movement_date ?? ''}
                   warn={record.aging_days >= 30}
                 />
               )}
               {record.system_qty !== null && record.counted_qty !== null && record.system_qty !== record.counted_qty && (
                 <MetricCard
-                  label="Count Variance"
-                  value={`${record.counted_qty - record.system_qty > 0 ? '+' : ''}${record.counted_qty - record.system_qty} units`}
-                  sub={`System: ${record.system_qty} · Counted: ${record.counted_qty}`}
+                  label={t('detail.countVariance')}
+                  value={t('detail.nUnits', { n: `${record.counted_qty - record.system_qty > 0 ? '+' : ''}${record.counted_qty - record.system_qty}` })}
+                  sub={t('detail.systemCounted', { system: record.system_qty, counted: record.counted_qty })}
                   warn={true}
                 />
               )}
@@ -212,7 +214,7 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
 
           {/* Estimated Business Impact */}
           {(record.primary_exception_type === 'aging' || record.primary_exception_type === 'stockout_risk' || record.primary_exception_type === 'count_mismatch') && (
-            <Section title="Estimated Business Impact">
+            <Section title={t('dash.estImpact')}>
               <div className="rounded-lg p-4 border bg-surface-700/50 border-surface-600 flex justify-between items-center relative overflow-hidden">
                 <div className="absolute top-0 right-0 p-1 opacity-10">
                   <svg className="w-16 h-16 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -221,9 +223,9 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
                 </div>
                 <div className="relative z-10 hidden sm:block">
                   <p className="text-xs text-muted mb-1 uppercase tracking-wider font-semibold">
-                    {record.primary_exception_type === 'aging' && 'Capital at Risk'}
-                    {record.primary_exception_type === 'stockout_risk' && 'Shortage Value'}
-                    {record.primary_exception_type === 'count_mismatch' && 'Variance Value'}
+                    {record.primary_exception_type === 'aging' && t('detail.capitalAtRisk')}
+                    {record.primary_exception_type === 'stockout_risk' && t('detail.shortageValue')}
+                    {record.primary_exception_type === 'count_mismatch' && t('detail.varianceValue')}
                   </p>
                   <p className="text-2xl font-bold font-mono text-gray-100">
                     {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(
@@ -237,16 +239,16 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
                   <div className="flex items-center gap-1.5 justify-end mb-1">
                     {record.is_cost_estimated ? (
                       <span className="text-[10px] uppercase font-bold text-yellow-500 border border-yellow-700/50 rounded px-1.5 py-0.5 bg-yellow-900/30">
-                        Estimated Fallback
+                        {t('detail.estimatedFallback')}
                       </span>
                     ) : (
                       <span className="text-[10px] uppercase font-bold text-green-400 border border-green-700/50 rounded px-1.5 py-0.5 bg-green-900/30">
-                        Actual Unit Cost
+                        {t('detail.actualUnitCost')}
                       </span>
                     )}
                   </div>
                   <p className="text-sm font-mono text-gray-400">
-                    {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(record.unit_cost || 0)} / unit
+                    {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(record.unit_cost || 0)} {t('detail.perUnit')}
                   </p>
                 </div>
               </div>
@@ -254,26 +256,26 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
           )}
 
           {/* Inventory data */}
-          <Section title="Inventory Record">
+          <Section title={t('detail.inventoryRecord')}>
             <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-              <DataRow label="On Hand" value={formatNum(record.on_hand_qty)} />
-              <DataRow label="Reorder Point" value={formatNum(record.reorder_point)} />
-              <DataRow label="Safety Stock" value={formatNum(record.safety_stock)} />
-              <DataRow label="Avg Daily Usage" value={formatNum(record.avg_daily_usage, 2)} />
-              <DataRow label="Lead Time" value={record.lead_time_days !== null ? `${record.lead_time_days}d` : '—'} />
-              <DataRow label="Open PO Qty" value={formatNum(record.open_po_qty)} />
-              <DataRow label="System Qty" value={formatNum(record.system_qty)} />
-              <DataRow label="Counted Qty" value={formatNum(record.counted_qty)} />
-              <DataRow label="Last Movement" value={record.last_movement_date ?? '—'} />
+              <DataRow label={t('detail.onHand')} value={formatNum(record.on_hand_qty)} />
+              <DataRow label={t('detail.reorderPoint')} value={formatNum(record.reorder_point)} />
+              <DataRow label={t('detail.safetyStock')} value={formatNum(record.safety_stock)} />
+              <DataRow label={t('detail.avgDailyUsage')} value={formatNum(record.avg_daily_usage, 2)} />
+              <DataRow label={t('detail.leadTime')} value={record.lead_time_days !== null ? `${record.lead_time_days}d` : '—'} />
+              <DataRow label={t('detail.openPo')} value={formatNum(record.open_po_qty)} />
+              <DataRow label={t('detail.systemQty')} value={formatNum(record.system_qty)} />
+              <DataRow label={t('detail.countedQty')} value={formatNum(record.counted_qty)} />
+              <DataRow label={t('detail.lastMovement')} value={record.last_movement_date ?? '—'} />
             </div>
           </Section>
 
           {/* Investigation & Action (Root Cause Workflow) */}
           <Section
-            title="Investigation & Action"
+            title={t('detail.investigation')}
             rightAccessory={
               <span className={`text-[10px] font-mono transition-opacity duration-300 ${saveStatusStr === 'saved' ? 'opacity-100 text-green-400' : saveStatusStr === 'saving' ? 'opacity-100 text-gray-400' : 'opacity-0'}`}>
-                {saveStatusStr === 'saved' ? '✓ Saved' : 'Saving...'}
+                {saveStatusStr === 'saved' ? t('detail.saved') : t('detail.saving')}
               </span>
             }
           >
@@ -281,29 +283,29 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               {/* Row 1: Root Cause & Owner */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs text-muted mb-1">Root Cause</label>
+                  <label className="block text-xs text-muted mb-1">{t('detail.rootCause')}</label>
                   <select
                     value={meta.root_cause || ''}
                     onChange={e => handleMetaChange({ root_cause: (e.target.value || null) as RootCauseCategory })}
                     className="select w-full"
                   >
-                    <option value="">Select root cause…</option>
-                    <option value="counting_error">Counting Error</option>
-                    <option value="receiving_delay">Receiving Delay</option>
-                    <option value="master_data_issue">Master Data Issue</option>
-                    <option value="damaged_inventory">Damaged Inventory</option>
-                    <option value="supplier_short_shipment">Supplier Short Shipment</option>
-                    <option value="picking_error">Picking Error</option>
-                    <option value="other">Other</option>
+                    <option value="">{t('detail.selectRootCause')}</option>
+                    <option value="counting_error">{t('rc.counting_error')}</option>
+                    <option value="receiving_delay">{t('rc.receiving_delay')}</option>
+                    <option value="master_data_issue">{t('rc.master_data_issue')}</option>
+                    <option value="damaged_inventory">{t('rc.damaged_inventory')}</option>
+                    <option value="supplier_short_shipment">{t('rc.supplier_short_shipment')}</option>
+                    <option value="picking_error">{t('rc.picking_error')}</option>
+                    <option value="other">{t('rc.other')}</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-muted mb-1">Owner</label>
+                  <label className="block text-xs text-muted mb-1">{t('detail.owner')}</label>
                   <input
                     type="text"
                     value={meta.owner}
                     onChange={e => handleMetaChange({ owner: e.target.value })}
-                    placeholder="e.g. jdoe"
+                    placeholder={t('detail.ownerPh')}
                     className="input w-full text-sm"
                   />
                 </div>
@@ -312,7 +314,7 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               {/* Row 2: Due Date & Recurring */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs text-muted mb-1">Due Date</label>
+                  <label className="block text-xs text-muted mb-1">{t('detail.dueDate')}</label>
                   <input
                     type="date"
                     value={meta.due_date}
@@ -328,7 +330,7 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
                     >
                       <div className={`w-3.5 h-3.5 bg-white rounded-full mt-0.5 transition-transform ${meta.recurring_issue ? 'translate-x-4 ml-0.5' : 'ml-0.5'}`} />
                     </div>
-                    <span className="text-xs text-muted">Recurring Issue</span>
+                    <span className="text-xs text-muted">{t('detail.recurringIssue')}</span>
                   </label>
                 </div>
               </div>
@@ -336,12 +338,12 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               {/* Recurring Reason (Conditional) */}
               {meta.recurring_issue && (
                 <div className="bg-orange-900/10 border border-orange-800/30 rounded p-3">
-                  <label className="block text-xs text-orange-400/80 mb-1">Why is this recurring?</label>
+                  <label className="block text-xs text-orange-400/80 mb-1">{t('detail.whyRecurring')}</label>
                   <input
                     type="text"
                     value={meta.recurring_reason}
                     onChange={e => handleMetaChange({ recurring_reason: e.target.value })}
-                    placeholder="e.g. Supplier habitually ships short..."
+                    placeholder={t('detail.recurringPh')}
                     className="input w-full text-sm border-orange-800/50 focus:border-orange-500/50"
                   />
                 </div>
@@ -349,12 +351,12 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
 
               {/* Notes */}
               <div>
-                <label className="block text-xs text-muted mb-1">Root Cause Notes</label>
+                <label className="block text-xs text-muted mb-1">{t('detail.rootCauseNotes')}</label>
                 <textarea
                   id="detail-note-field"
                   value={note}
                   onChange={e => handleNoteChange(e.target.value)}
-                  placeholder="Add details about the investigation… (auto-saved)"
+                  placeholder={t('detail.notesPh')}
                   className="input w-full h-20 resize-none text-sm"
                 />
               </div>
@@ -362,22 +364,22 @@ export default function ItemDetail({ record, onClose, onUpdate }: Props) {
               {/* Actions */}
               <div className="grid grid-cols-1 gap-4">
                 <div>
-                  <label className="block text-xs text-muted mb-1">Corrective Action</label>
+                  <label className="block text-xs text-muted mb-1">{t('detail.corrective')}</label>
                   <input
                     type="text"
                     value={meta.corrective_action}
                     onChange={e => handleMetaChange({ corrective_action: e.target.value })}
-                    placeholder="Immediate fix…"
+                    placeholder={t('detail.correctivePh')}
                     className="input w-full text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-muted mb-1">Prevention Action</label>
+                  <label className="block text-xs text-muted mb-1">{t('detail.prevention')}</label>
                   <input
                     type="text"
                     value={meta.prevention_action}
                     onChange={e => handleMetaChange({ prevention_action: e.target.value })}
-                    placeholder="Long-term fix…"
+                    placeholder={t('detail.preventionPh')}
                     className="input w-full text-sm"
                   />
                 </div>

@@ -13,9 +13,13 @@ import NotificationsPanel from './components/NotificationsPanel';
 import EmailPreferencesPanel from './components/EmailPreferences';
 import EmailVerificationModal from './components/EmailVerificationModal';
 import { emailClient } from './api/emailClient';
+import { useI18n } from './i18n';
 
 export default function App() {
+  const { t, lang } = useI18n();
   const [view, setView] = useState<ViewType>('import');
+  // Raw rows are kept so reasons/actions can be regenerated when the language changes
+  const [rawRecords, setRawRecords] = useState<RawInventoryRecord[]>([]);
   const [records, setRecords] = useState<ProcessedRecord[]>([]);
   const [dataSource, setDataSource] = useState<'demo' | 'csv' | null>(null);
   const [selectedItem, setSelectedItem] = useState<ProcessedRecord | null>(null);
@@ -35,11 +39,20 @@ export default function App() {
   // Regenerate notifications whenever records change.
   // Read state is preserved via localStorage (stable IDs per SKU+location+alertType).
   useEffect(() => {
-    setNotifications(generateNotifications(records));
-  }, [records]);
+    setNotifications(generateNotifications(records, lang));
+  }, [records, lang]);
+
+  // Re-run the engine in the new language. Status, notes and case metadata are
+  // re-read from localStorage inside processRecords, so nothing the user typed is lost.
+  useEffect(() => {
+    const processed = processRecords(rawRecords, lang);
+    setRecords(processed);
+    setSelectedItem(prev => (prev ? processed.find(r => r.id === prev.id) ?? null : null));
+  }, [rawRecords, lang]);
 
   function handleDataLoaded(raw: RawInventoryRecord[], source: 'demo' | 'csv') {
-    const processed = processRecords(raw);
+    const processed = processRecords(raw, lang);
+    setRawRecords(raw);
     setRecords(processed);
     setDataSource(source);
     setView('dashboard');
@@ -64,6 +77,7 @@ export default function App() {
 
   function handleNewDataSource() {
     setView('import');
+    setRawRecords([]);
     setRecords([]);
     setDataSource(null);
     setSelectedItem(null);
@@ -184,13 +198,13 @@ export default function App() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                     d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
-                Email notifications
+                {t('app.emailNotifications')}
               </h2>
               <button
                 id="email-settings-close"
                 onClick={() => setShowEmailSettings(false)}
                 className="text-muted hover:text-gray-200 transition-colors"
-                aria-label="Close"
+                aria-label={t('app.close')}
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -203,7 +217,7 @@ export default function App() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                   d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span><strong>Phase 2 – Active backend.</strong> Preferences sync to server. Emails trigger on critical exceptions if opted in.</span>
+              <span><strong>{t('app.phase2Title')}</strong> {t('app.phase2Body')}</span>
             </div>
             {/* scrollable body */}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">

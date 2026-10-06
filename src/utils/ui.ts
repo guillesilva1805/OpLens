@@ -1,4 +1,5 @@
 import type { Priority, ExceptionType, Status, AlertType } from '../types';
+import type { TFn, TKey } from '../i18n';
 
 export function getPriorityBadgeClass(priority: Priority): string {
   switch (priority) {
@@ -10,19 +11,12 @@ export function getPriorityBadgeClass(priority: Priority): string {
   }
 }
 
-export function getPriorityLabel(priority: Priority): string {
-  return priority.charAt(0).toUpperCase() + priority.slice(1);
+export function getPriorityLabel(priority: Priority, t: TFn): string {
+  return t(`priority.${priority}`);
 }
 
-export function getExceptionLabel(type: ExceptionType | null): string {
-  switch (type) {
-    case 'stockout_risk': return 'Stockout Risk';
-    case 'low_stock': return 'Low Stock';
-    case 'count_mismatch': return 'Count Mismatch';
-    case 'aging': return 'Aging';
-    case 'manual_review': return 'Manual Review';
-    default: return '—';
-  }
+export function getExceptionLabel(type: ExceptionType | null, t: TFn): string {
+  return type ? t(`exc.${type}`) : '—';
 }
 
 export function getExceptionColor(type: ExceptionType | null): string {
@@ -45,17 +39,25 @@ export function getStatusClass(status: Status): string {
   }
 }
 
+const STATUS_KEYS: Record<Status, TKey> = {
+  'New': 'status.new',
+  'In Review': 'status.in_review',
+  'Waiting': 'status.waiting',
+  'Resolved': 'status.resolved',
+};
+
+/** Status values stay in English as storage keys; only the label is translated. */
+export function getStatusLabel(status: Status, t: TFn): string {
+  return t(STATUS_KEYS[status]);
+}
+
 export function formatNum(v: number | null, decimals = 0): string {
   if (v === null) return '—';
   return v.toFixed(decimals);
 }
 
-export function getAlertTypeLabel(type: AlertType): string {
-  switch (type) {
-    case 'low_stock': return 'Low Stock';
-    case 'high_stock': return 'Overstock';
-    case 'slow_movement': return 'Slow Movement';
-  }
+export function getAlertTypeLabel(type: AlertType, t: TFn): string {
+  return t(`alertType.${type}`);
 }
 
 export function getAlertTypeColor(type: AlertType): string {
